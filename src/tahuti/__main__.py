@@ -52,6 +52,7 @@ from urllib.parse import urljoin, urlparse
 from .auth import apply_authenticated, build_client, hub_client, session_email
 from .client import ManageBacClient, parse_task_url
 from . import __version__
+from . import config
 from . import keychain
 from .config import (
     all_creds_paths,
@@ -290,11 +291,7 @@ def _login_email(state) -> str | None:
     return session_email(state) or None
 
 
-DEFAULT_SNAPSHOT_PATH = config_dir() / "snapshot.json"
-# Fallback freshness window for reusing the local snapshot instead of
-# re-crawling. `--cache-ttl` and `defaults.cache_ttl` override it; it used to
-# be hardcoded at the `list` call site so neither of them could.
-DEFAULT_SNAPSHOT_TTL = 900
+DEFAULT_SNAPSHOT_PATH = config_dir() / SNAPSHOT_FILENAME
 
 
 def load_snapshot(path: Path) -> dict:
@@ -342,14 +339,20 @@ def _harden_dir(path: Path) -> None:
 def _snapshot_path(state) -> Path:
     """Return the snapshot path that belongs to *state*'s config directory.
 
-    The snapshot lives beside the config file, so ``--config`` relocates both.
-    This is deliberately *not* :data:`DEFAULT_SNAPSHOT_PATH`, which ignores
-    ``--config`` and is only a fallback for callers with no state at all.
+    Delegates to :func:`tahuti.config.snapshot_path` rather than restating the
+    rule, because the submit containment check derives the very same path to
+    refuse it and the MCP server reads it. See that function for the full
+    reason the filename has to be stated once.
 
-    The filename comes from :data:`tahuti.config.SNAPSHOT_FILENAME` because the
-    submit containment check has to derive the very same path to refuse it.
+    Kept as a private name because this module's call sites all read
+    ``_snapshot_path(state)``; the public spelling is the one to import.
+
+    Called through the module rather than imported by name: ten functions below
+    bind ``snapshot_path`` as a parameter or a local, so a module-level function
+    of that name would be compiled as a local inside each of them and raise
+    ``UnboundLocalError`` the first time one of them called it.
     """
-    return state.config_path.parent / SNAPSHOT_FILENAME
+    return config.snapshot_path(state)
 
 
 def _set_submission_state(
@@ -622,11 +625,17 @@ def cmd_list(args) -> int:
     # HTTP response cache. This used to be a hardcoded 900, so `--cache-ttl 30`
     # (and `defaults.cache_ttl`) were accepted and then ignored here: five
     # minutes after a full crawl `list` still re-rendered the stale snapshot.
+    #
+    # There is deliberately no third fallback below. `load_state` is the only
+    # way a ProfileConfig is built, and it passes `default_cache_ttl` through
+    # `config._coerce_cache_ttl`, which substitutes `DEFAULT_CACHE_TTL` for
+    # anything non-numeric — a null config key included. The field's own
+    # default is that same constant, so a None TTL cannot reach this line, and
+    # a `DEFAULT_SNAPSHOT_TTL` sitting here as a belt-and-braces default was
+    # unreachable and a fourth spelling of 900.
     snapshot_ttl = args.cache_ttl
     if snapshot_ttl is None:
         snapshot_ttl = state.profile.default_cache_ttl
-    if snapshot_ttl is None:
-        snapshot_ttl = DEFAULT_SNAPSHOT_TTL
 
     use_cached_snapshot = False
     if old_snapshot and not args.refresh:
