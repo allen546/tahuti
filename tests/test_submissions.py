@@ -292,11 +292,20 @@ def test_cli_submissions_missing_target(mock_print, mock_auth, mock_build):
 
 
 @patch("tahuti.mcp_server.build_client")
-@patch("tahuti.mcp_server.parse_task_url", return_value=("101", "202"))
-def test_mcp_delete_submission(mock_parse, mock_build):
+@patch("tahuti.__main__._resolve_task_ids", return_value=("101", "202"))
+def test_mcp_delete_submission(mock_resolve, mock_build):
+    """`delete_submission` resolves through the CLI's one shared ladder.
+
+    This used to patch ``tahuti.mcp_server.parse_task_url``, because the tool
+    carried its own copy of the ladder and that was the copy's entry point.
+    The MCP copy also ended at ``get_tasks_by_view`` with no
+    ``find_task_by_id`` step, so this tool reported tasks unresolvable that the
+    CLI submits to; the shared ladder is what the contract now names.
+    """
     client = _make_client()
     mock_build.return_value = (MagicMock(), client, "test@example.com")
-    with patch.object(client, "delete_submission", return_value={"ok": True, "asset_id": "82189817", "filename": "hw.pdf"}):
+    with patch.object(client, "delete_submission", return_value={"ok": True, "asset_id": "82189817", "filename": "hw.pdf"}) as mock_delete:
         res = json.loads(mcp_server.delete_submission("202", "82189817"))
         assert res["ok"] is True
         assert res["asset_id"] == "82189817"
+        mock_delete.assert_called_once_with("101", "202", "82189817")

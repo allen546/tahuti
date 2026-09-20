@@ -50,7 +50,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 from .auth import apply_authenticated, build_client, hub_client, session_email
-from .client import ManageBacClient, parse_task_url
+from .client import ManageBacClient, parse_task_url, task_id_from_target
 from . import __version__
 from . import keychain
 from .config import (
@@ -745,12 +745,32 @@ def cmd_view(args) -> int:
     task = None
     detail = None
 
-    if target and (
-        target.startswith("http://")
-        or target.startswith("https://")
-        or "/core_tasks/" in target
-    ):
-        task_id = target.split("core_tasks/")[-1].split("/")[0]
+    if not target:
+        payload = error("view", "missing_target", "Provide a task id or task url")
+        print_payload(payload, args.output, args.format)
+        return 1
+
+    # One derivation of "read a task id from this target", shared with the MCP
+    # tools through `client.task_id_from_target`.  The gate used to be
+    # `startswith("http")` OR `"/core_tasks/" in target`, which admitted *any*
+    # URL and then split it on a separator it did not contain — so a class URL
+    # or an unrelated link produced the whole string as the "id" and a detail
+    # fetch against it, while the MCP tool refused the same input.  Two
+    # derivations of one rule with opposite acceptance.
+    #
+    # The branch still keys off "/core_tasks/" because that is what decides
+    # whether the target already names a detail page: a URL is fetched verbatim
+    # and only borrows the snapshot's metadata, whereas a bare id has to find a
+    # link before there is anything to fetch.  Those are genuinely different
+    # fetches, so the branches stay; only the reading of the id is shared.
+    try:
+        task_id = task_id_from_target(target)
+    except CommandError as exc:
+        payload = error("view", exc.code, exc.message)
+        print_payload(payload, args.output, args.format)
+        return 1
+
+    if "/core_tasks/" in target:
         # Search local snapshot first to populate standard fields
         snapshot_path = _snapshot_path(state)
         snapshot = load_snapshot(snapshot_path)
@@ -760,12 +780,6 @@ def cmd_view(args) -> int:
         if not task:
             task = {"id": task_id, "link": target}
     else:
-        task_id = args.id or args.target
-        if not task_id:
-            payload = error("view", "missing_target", "Provide a task id or task url")
-            print_payload(payload, args.output, args.format)
-            return 1
-
         # 1. Search local snapshot first
         snapshot_path = _snapshot_path(state)
         snapshot = load_snapshot(snapshot_path)

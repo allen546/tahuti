@@ -134,3 +134,94 @@ class TestViewTaskResolution:
 
         assert data == {"error": "404 Not Found"}
         assert "task" not in data
+
+
+# ── One derivation, two surfaces ────────────────────────────────────────
+
+
+class _ViewArgs:
+    """The argparse namespace `cmd_view` receives, for a bare ``target``."""
+
+    def __init__(self, target):
+        self.target = target
+        self.id = None
+        self.url = None
+        self.pages = None
+        self.refresh = False
+        self.subject = None
+        self.output = None
+        self.format = "json"
+
+
+def _cli_verdict(target: str, tmp_path) -> str:
+    """``"ok"`` or the error code ``mb view <target>`` answered with."""
+    from tahuti.__main__ import cmd_view
+
+    state = MagicMock()
+    state.active_profile = "default"
+    # `_snapshot_path` reads beside the config file, so this keeps the sandbox
+    # off the operator's real ~/.config/tahuti.
+    state.config_path = tmp_path / "config.json"
+    client = MagicMock()
+    client.get_task_detail.return_value = {"description": "Task body"}
+    task = {"id": "1000099", "title": "HW", "link": TASK_URL}
+
+    with (
+        patch("tahuti.__main__._build_client", return_value=(state, client, "a@b.com")),
+        patch("tahuti.__main__._authenticate_client"),
+        patch("tahuti.__main__.load_snapshot", return_value={}),
+        patch("tahuti.__main__.find_task_by_id", return_value=task),
+        patch("tahuti.__main__.print_payload") as printed,
+    ):
+        rc = cmd_view(_ViewArgs(target))
+    if rc == 0:
+        return "ok"
+    return printed.call_args[0][0]["error"]["code"]
+
+
+def _mcp_verdict(view_task_env, target: str) -> str:
+    """``"ok"`` or the error code ``view_task(task_url=...)`` answered with."""
+    state, _client = view_task_env
+    # A bare id has to be findable for the tool to get past resolution, which is
+    # what makes an *accepted* bare id distinguishable from a refused one.
+    write_snapshot(state, [{"id": "1000099", "link": TASK_URL, "title": "HW"}])
+    data = json.loads(view_task(task_url=target))
+    return "ok" if "task" in data else "error"
+
+
+# Targets that name a task: a bare numeric id, and a URL carrying
+# ``/core_tasks/<id>``.
+ACCEPTED_TARGETS = ("1000099", TASK_URL, f"{TASK_URL}?tab=submissions")
+
+# Targets that do not. The class URL is the one that mattered: it used to be
+# read as task id ``1000014``.
+REFUSED_TARGETS = (
+    "",
+    "   ",
+    "not-a-task-id",
+    "1000099/../../etc/passwd",
+    "https://myschool.managebac.cn/student/classes/1000014",
+    "https://myschool.managebac.cn/attachments/1/leak.pdf",
+)
+
+
+class TestBothSurfacesReadATaskIdTheSameWay:
+    """``mb view`` and the MCP ``view_task`` must agree about what a target *is*.
+
+    They used to each carry the rule, and disagreed: the CLI's gate
+    (``startswith("http")`` OR ``"/core_tasks/" in target``) admitted every URL
+    and then split it on a separator it did not contain, so a class URL became
+    the whole string as the "id" and was fetched anyway; the MCP tool demanded
+    the separator and refused.  Both now call ``client.task_id_from_target``, so
+    the same target gets the same verdict from either entry point.
+    """
+
+    @pytest.mark.parametrize("target", ACCEPTED_TARGETS)
+    def test_accepted_by_both(self, view_task_env, tmp_path, target):
+        assert _cli_verdict(target, tmp_path) == "ok", f"CLI refused {target!r}"
+        assert _mcp_verdict(view_task_env, target) == "ok", f"MCP refused {target!r}"
+
+    @pytest.mark.parametrize("target", REFUSED_TARGETS)
+    def test_refused_by_both(self, view_task_env, tmp_path, target):
+        assert _cli_verdict(target, tmp_path) != "ok", f"CLI accepted {target!r}"
+        assert _mcp_verdict(view_task_env, target) != "ok", f"MCP accepted {target!r}"
