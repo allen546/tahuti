@@ -45,6 +45,10 @@ ALLOWED_DOMAINS = frozenset({"managebac.com", "managebac.cn"})
 # A school subdomain must be a plain DNS label.
 _SCHOOL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?$")
 
+# ManageBac object ids are plain integers, so anything else is not a task id
+# however it is spelled.  `task_id_from_target` is the only reader.
+_TASK_ID_RE = re.compile(r"^\d+$")
+
 
 class SessionExpiredError(RuntimeError):
     """The server answered with the sign-in page — the session cookie is dead.
@@ -306,6 +310,40 @@ def parse_task_url(target: str) -> tuple[str | None, str | None]:
         return m.group(1), m.group(2)
     clean = target.rstrip("/").split("/")[-1]
     return None, clean if clean else None
+
+
+def task_id_from_target(target: str) -> str:
+    """Read a task id out of a task id, a full task URL, or a task path.
+
+    One derivation of a rule that used to be written twice, with opposite
+    acceptance.  ``parse_task_url``'s "last path segment" fallback will happily
+    return a *class* id for a class URL, so a caller that split on
+    ``"core_tasks/"`` without checking the separator was there got the entire
+    input back as the "id" — and the CLI's ``view`` gate (``startswith("http")``
+    OR ``"/core_tasks/" in target``) admitted every URL, so a class URL or an
+    unrelated link reached that split and produced a garbage id, while the MCP
+    tool refused the same input.  Both surfaces now ask here.
+
+    A bare numeric id passes through unchanged; anything else must really carry
+    ``/core_tasks/<id>``.  Refusal is a :class:`CommandError` so each caller can
+    put it in its own envelope — ``client.py`` already raises these for bad
+    school and task arguments, and neither the CLI nor the MCP layer should
+    have to learn the other's exception type to report one bad target.
+    """
+    text = str(target or "").strip()
+    if not text:
+        raise CommandError("missing_target", "Provide task_id or task_url")
+    if _TASK_ID_RE.match(text):
+        return text
+    _cid, tid = parse_task_url(text)
+    if tid and _TASK_ID_RE.match(tid) and "/core_tasks/" in text:
+        return tid
+    raise CommandError(
+        "invalid_target",
+        "Could not read a numeric task id from "
+        f"{text[:120]!r}; pass a numeric id or a full task URL containing "
+        "'/core_tasks/<id>'",
+    )
 
 
 def _coerce_chart_points(raw: Any) -> list[float]:

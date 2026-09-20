@@ -1,0 +1,8 @@
+{
+  "ok": false,
+  "command": "view",
+  "error": {
+    "code": "task_not_found",
+    "message": "No task found for id 99999999"
+  }
+}

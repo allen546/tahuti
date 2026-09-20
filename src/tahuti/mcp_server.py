@@ -12,9 +12,11 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from .auth import build_client, hub_client
-from .client import parse_task_url
+from .client import task_id_from_target
 from .config import own_state_refusal
 from .filters import InvalidViewError, normalize_view, result_views, summary_of
+from .exceptions import CommandError
+from .filters import InvalidViewError, normalize_view, result_views
 from .notifications import MNNHubClient
 
 log = logging.getLogger(__name__)
@@ -169,22 +171,45 @@ def _resolve_task_id(target: str) -> str:
     yield the *entire* input as the "id" (``"https://…".split("core_tasks/")[-1]``
     with no separator present), and ``parse_task_url``'s "last path segment"
     fallback would happily return a *class* id for a class URL.
+
+    The rule itself now lives in :func:`client.task_id_from_target`, which the
+    CLI's ``view`` command also calls — the two surfaces used to derive it
+    independently and disagreed about what to accept.  This wrapper keeps the
+    :class:`InvalidToolInput` contract every tool here reports through.
     """
-    text = str(target or "").strip()
-    if not text:
-        raise InvalidToolInput("Provide task_id or task_url")
-    if _ID_RE.match(text):
-        return text
-    _cid, tid = parse_task_url(text)
-    # parse_task_url falls back to "last path segment", which may be a *class*
-    # id, so a URL target must really be a core_tasks URL.
-    if tid and _ID_RE.match(tid) and "/core_tasks/" in text:
-        return tid
-    raise InvalidToolInput(
-        "Could not read a numeric task id from "
-        f"{text[:120]!r}; pass a numeric id or a full task URL containing "
-        "'/core_tasks/<id>'"
-    )
+    try:
+        return task_id_from_target(target)
+    except CommandError as exc:
+        raise InvalidToolInput(exc.message) from exc
+
+
+def _class_and_task(client, target: str, pages: int = 10) -> tuple[str, str]:
+    """Resolve *target* to ``(class_id, task_id)`` through the CLI's one ladder.
+
+    Three tools here — ``submit_file``, ``delete_submission`` and
+    ``get_teacher_feedback`` — each carried their own copy of this ladder, and
+    each was wrong in a different way.  Two of them still ended in
+    ``get_tasks_by_view``, the "second, overlapping source of the same tasks"
+    that ``list_tasks`` was moved off, so a class whose tasks only appear on its
+    own core_tasks page resolved here but not in the CLI's ``list``.
+    ``delete_submission`` had no final step at all, so it reported tasks
+    unresolvable that the CLI submits to.  The CLI's ``_resolve_task_ids`` is
+    the ladder that survived that cleanup — URL, then the local snapshot, then
+    ``crawl_all``, then ``find_task_by_id`` — and it is the only one left.
+
+    The page budget is the CLI's default rather than the ad-hoc 3, 5 and 10 the
+    three copies used, so the MCP tools now see exactly the task set the CLI
+    does.  ``CommandError`` is that ladder's refusal; it is restated as an
+    :class:`InvalidToolInput` so the ``{"error": ...}`` payload these tools
+    already return on failure is still what a caller sees, instead of an
+    exception escaping into the MCP transport.
+    """
+    from .__main__ import _resolve_task_ids
+
+    try:
+        return _resolve_task_ids(client, target, pages)
+    except CommandError as exc:
+        raise InvalidToolInput(exc.message) from exc
 
 
 # ── Tasks ───────────────────────────────────────────────────────────────
@@ -468,50 +493,17 @@ def submit_file(
         retry=retry,
     )
 
-    cid, tid = parse_task_url(task_id)
-    if cid and tid:
-        class_id, tid = cid, tid
-    else:
-        found = False
-        from .__main__ import DEFAULT_SNAPSHOT_PATH, load_snapshot, find_task_by_id
-        snapshot = load_snapshot(DEFAULT_SNAPSHOT_PATH)
-        snap_task = find_task_by_id(snapshot, task_id)
-        if snap_task and snap_task.get("link"):
-            c_id, t_id = parse_task_url(snap_task["link"])
-            if c_id and t_id:
-                class_id, tid = c_id, t_id
-                found = True
-
-        if not found:
-            # Search upcoming and overdue first (most likely for submissions)
-            for view in ("upcoming", "overdue"):
-                tasks = client.get_tasks_by_view(view, max_pages=3)
-                for t in tasks:
-                    if t.get("id") == task_id:
-                        c_id, t_id = parse_task_url(t.get("link", ""))
-                        if c_id and t_id:
-                            class_id, tid = c_id, t_id
-                            found = True
-                            break
-                if found:
-                    break
-
-        if not found:
-            # Fall back to past tasks
-            tasks = client.get_tasks_by_view("past", max_pages=3)
-            for t in tasks:
-                if t.get("id") == task_id:
-                    c_id, t_id = parse_task_url(t.get("link", ""))
-                    if c_id and t_id:
-                        class_id, tid = c_id, t_id
-                        found = True
-                        break
-
-        if not found:
-            return json.dumps({"error": f"Task {task_id} not found"})
+    # One ladder, the CLI's: a full task URL resolves from itself, and a bare id
+    # is looked up in the local snapshot, then `crawl_all`, then
+    # `find_task_by_id`.  The `get_tasks_by_view` steps this replaces came from
+    # the second, overlapping task source `list_tasks` was moved off.
+    try:
+        class_id, resolved_id = _class_and_task(client, task_id)
+    except InvalidToolInput as exc:
+        return _invalid_input(exc)
 
     try:
-        result = client.submit_file(class_id, tid, safe_path)
+        result = client.submit_file(class_id, resolved_id, safe_path)
         # Eagerly refresh snapshot
         try:
             from .__main__ import (
@@ -521,7 +513,7 @@ def submit_file(
                 update_snapshot_with_class_tasks,
             )
             snapshot = load_snapshot(DEFAULT_SNAPSHOT_PATH)
-            existing = find_task_by_id(snapshot, tid)
+            existing = find_task_by_id(snapshot, resolved_id)
             class_name = existing.get("class_name") if existing else None
             fresh_tasks = client.get_class_tasks(
                 class_id, class_name=class_name, bypass_cache=True
@@ -578,41 +570,17 @@ def delete_submission(
         retry=retry,
     )
 
-    cid, tid = parse_task_url(task_id)
-    if cid and tid:
-        class_id, tid = cid, tid
-    else:
-        found = False
-        from .__main__ import DEFAULT_SNAPSHOT_PATH, load_snapshot, find_task_by_id
-
-        snapshot = load_snapshot(DEFAULT_SNAPSHOT_PATH)
-        snap_task = find_task_by_id(snapshot, task_id)
-        if snap_task and snap_task.get("link"):
-            c_id, t_id = parse_task_url(snap_task["link"])
-            if c_id and t_id:
-                class_id, tid = c_id, t_id
-                found = True
-
-        if not found:
-            for view in ("upcoming", "overdue", "past"):
-                tasks = client.get_tasks_by_view(view, max_pages=3)
-                for t in tasks:
-                    if t.get("id") == task_id:
-                        c_id, t_id = parse_task_url(t.get("link", ""))
-                        if c_id and t_id:
-                            class_id, tid = c_id, t_id
-                            found = True
-                            break
-                if found:
-                    break
-
-        if not found:
-            return json.dumps(
-                {"error": f"Could not resolve class_id for task {task_id}"}
-            )
+    # The same one ladder `submit_file` and the CLI use.  This tool's own copy
+    # ended at `get_tasks_by_view`, with no `find_task_by_id` step, so it
+    # answered "Could not resolve class_id" for tasks the CLI happily submits
+    # to — the divergence this replaces.
+    try:
+        class_id, resolved_id = _class_and_task(client, task_id)
+    except InvalidToolInput as exc:
+        return _invalid_input(exc)
 
     try:
-        result = client.delete_submission(class_id, tid, asset_id)
+        result = client.delete_submission(class_id, resolved_id, asset_id)
         try:
             from .__main__ import (
                 DEFAULT_SNAPSHOT_PATH,
@@ -623,7 +591,7 @@ def delete_submission(
 
             if result.get("remaining_submissions", 0) == 0:
                 old_snapshot = load_snapshot(DEFAULT_SNAPSHOT_PATH)
-                existing = find_task_by_id(old_snapshot, tid)
+                existing = find_task_by_id(old_snapshot, resolved_id)
                 if existing:
                     existing["status"] = "not-submitted"
                     existing["has_submit_button"] = True
@@ -679,37 +647,16 @@ def get_teacher_feedback(
     if not target:
         return json.dumps({"error": "Provide task_id or task_url"})
 
-    cid, tid = parse_task_url(target)
-    if not (cid and tid):
-        tid = target
-        from .__main__ import DEFAULT_SNAPSHOT_PATH, load_snapshot, find_task_by_id
-        snapshot = load_snapshot(DEFAULT_SNAPSHOT_PATH)
-        snap_task = find_task_by_id(snapshot, tid)
-        if snap_task and snap_task.get("link"):
-            c_id, t_id = parse_task_url(snap_task["link"])
-            if c_id and t_id:
-                cid, tid = c_id, t_id
+    # This tool's copy was the only one with the right *shape* — snapshot, then
+    # `crawl_all`, then `find_task_by_id` — but with its own page budgets (5 and
+    # 10) and no validation of the target, so it accepted a URL the other tools
+    # refuse.  The CLI's ladder is now the single copy all three share.
+    try:
+        class_id, resolved_id = _class_and_task(client, target)
+    except InvalidToolInput as exc:
+        return _invalid_input(exc)
 
-        if not (cid and tid):
-            result = client.crawl_all(max_pages=5, fetch_details=False)
-            for task in result["upcoming"] + result["past"] + result["overdue"]:
-                if task.get("id") == tid:
-                    c_id, t_id = parse_task_url(task.get("link", ""))
-                    if c_id and t_id:
-                        cid, tid = c_id, t_id
-                        break
-
-            if not cid:
-                found = client.find_task_by_id(tid, max_pages=10)
-                if found and found.get("link"):
-                    c_id, t_id = parse_task_url(found["link"])
-                    if c_id and t_id:
-                        cid, tid = c_id, t_id
-
-    if not (cid and tid):
-        return json.dumps({"error": f"Could not find or resolve task with ID: {target}"})
-
-    result = client.get_teacher_feedback(cid, tid)
+    result = client.get_teacher_feedback(class_id, resolved_id)
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 

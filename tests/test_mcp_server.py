@@ -14,10 +14,12 @@ from tahuti.mcp_server import (
     _error_payload,
     _sanitize_error,
     count_grade_frequencies,
+    delete_submission,
     get_calendar_events,
     get_class_grades,
     get_ical_feed,
     get_notifications,
+    get_teacher_feedback,
     get_timetable,
     list_classes,
     list_tasks,
@@ -296,22 +298,48 @@ class TestSubmitFileTool:
         )
 
     def test_submit_not_found(self, mock_build_client, tmp_path):
+        """An id no source can resolve is an error payload, never an upload.
+
+        `get_tasks_by_view` used to be the tool's own resolution source; the
+        ladder is now the CLI's, whose last step is `find_task_by_id`.  That
+        method is configured here because leaving it a bare MagicMock would
+        hand `parse_task_url` a mock and raise a TypeError rather than answer.
+        """
         mock, mock_client = mock_build_client
         upload = tmp_path / "hw.pdf"
         upload.write_bytes(b"x")
-        mock_client.get_tasks_by_view.return_value = []
+        mock_client.find_task_by_id.return_value = None
         result = submit_file(task_id="99999", file_path=str(upload))
         data = json.loads(result)
         assert "error" in data
+        mock_client.submit_file.assert_not_called()
+        # The condemned second task source is not consulted at all now.
+        mock_client.get_tasks_by_view.assert_not_called()
 
     def test_submit_numeric_id_resolves(self, mock_build_client, tmp_path):
+        """A bare id resolves through `crawl_all`, the CLI's task source.
+
+        This test used to drive `get_tasks_by_view("upcoming")` directly, which
+        was the MCP tool's *own* copy of the ladder — the second, overlapping
+        source of the same tasks that `list_tasks` had already been moved off,
+        so a class whose tasks only appear on its own core_tasks page resolved
+        here but was missing from the CLI's `list`.  It now drives the shared
+        ladder, and the old source must stay untouched.
+        """
         mock, mock_client = mock_build_client
         upload = tmp_path / "hw.pdf"
         upload.write_bytes(b"x")
-        mock_client.get_tasks_by_view.side_effect = lambda view, max_pages: (
-            [{"id": "1000099", "link": "/student/classes/1000014/core_tasks/1000099"}]
-            if view == "upcoming" else []
-        )
+        mock_client.crawl_all.return_value = {
+            "upcoming": [],
+            "past": [],
+            "overdue": [
+                {
+                    "id": "1000099",
+                    "link": "/student/classes/1000014/core_tasks/1000099",
+                }
+            ],
+        }
+        mock_client.find_task_by_id.return_value = None
         mock_client.submit_file.return_value = {"ok": True}
         result = submit_file(task_id="1000099", file_path=str(upload))
         data = json.loads(result)
@@ -319,6 +347,7 @@ class TestSubmitFileTool:
         mock_client.submit_file.assert_called_once_with(
             "1000014", "1000099", str(upload.resolve())
         )
+        mock_client.get_tasks_by_view.assert_not_called()
 
     @pytest.mark.parametrize(
         "make_bad_path",
@@ -391,6 +420,125 @@ class TestSubmitFileTool:
         )
         assert "error" in data
         assert "SUPERSECRETVALUE" not in json.dumps(data)
+
+
+# ── One task-resolution ladder, shared with the CLI ──────────────────────
+
+
+class TestSharedTaskResolutionLadder:
+    """`submit_file`, `delete_submission` and `get_teacher_feedback`.
+
+    Each of these three tools carried its own copy of the ladder that turns a
+    target into a ``(class_id, task_id)`` pair, and each was wrong in a
+    different way.  Two of them ended in ``get_tasks_by_view`` — the second,
+    overlapping source of the same tasks that ``list_tasks`` had already been
+    moved off, so a class whose tasks only appear on its own core_tasks page
+    resolved here but was missing from the CLI's ``list``.  ``delete_submission``
+    had no final step at all, so it answered "Could not resolve class_id" for
+    tasks the CLI submits to.  All three now call the CLI's ``_resolve_task_ids``.
+    """
+
+    #: A `crawl_all` result with nothing in it, so only the later steps can
+    #: resolve anything.
+    EMPTY_CRAWL = {"upcoming": [], "past": [], "overdue": []}
+
+    @staticmethod
+    def _crawl_with(task_id: str, link: str) -> dict:
+        """A `crawl_all` result whose overdue section holds one task."""
+        return {"upcoming": [], "past": [], "overdue": [{"id": task_id, "link": link}]}
+
+    def test_delete_submission_resolves_what_only_find_task_by_id_knows(
+        self, mock_build_client
+    ):
+        """The step this tool's own ladder was missing.
+
+        A task that is in neither the snapshot nor the crawl still resolved for
+        the CLI, because `_resolve_task_ids` ends in `find_task_by_id`.  This
+        tool stopped before it, so the same id was unresolvable here.
+        """
+        mock, mock_client = mock_build_client
+        mock_client.crawl_all.return_value = self.EMPTY_CRAWL
+        mock_client.find_task_by_id.return_value = {
+            "id": "1000099",
+            "link": "/student/classes/1000014/core_tasks/1000099",
+        }
+        mock_client.delete_submission.return_value = {
+            "ok": True,
+            "asset_id": "82189817",
+        }
+
+        data = json.loads(delete_submission(task_id="1000099", asset_id="82189817"))
+
+        assert data["ok"] is True
+        mock_client.delete_submission.assert_called_once_with(
+            "1000014", "1000099", "82189817"
+        )
+        mock_client.get_tasks_by_view.assert_not_called()
+
+    def test_get_teacher_feedback_uses_the_same_ladder(self, mock_build_client):
+        """The tool whose copy already had the right shape, but its own budget.
+
+        It is the source that matters, not just the sequence of steps: the
+        tasks come from `crawl_all`, the same one the CLI's `list` reads.
+        """
+        mock, mock_client = mock_build_client
+        mock_client.crawl_all.return_value = self._crawl_with(
+            "1000099", "/student/classes/1000014/core_tasks/1000099"
+        )
+        mock_client.find_task_by_id.return_value = None
+        mock_client.get_teacher_feedback.return_value = {"comments": ["Good work"]}
+
+        data = json.loads(get_teacher_feedback(task_id="1000099"))
+
+        assert data == {"comments": ["Good work"]}
+        mock_client.get_teacher_feedback.assert_called_once_with("1000014", "1000099")
+        mock_client.get_tasks_by_view.assert_not_called()
+
+    def test_the_page_budget_is_the_clis(self, mock_build_client):
+        """The three copies used 3, 5 and 10 pages; the ladder has one number.
+
+        A different budget means a different set of resolvable tasks, so this
+        pins the MCP tools to the CLI's rather than to any copy's own.
+        """
+        mock, mock_client = mock_build_client
+        # An empty crawl, so the ladder walks past it to its last step and both
+        # budgets are exercised in one run.
+        mock_client.crawl_all.return_value = self.EMPTY_CRAWL
+        mock_client.find_task_by_id.return_value = None
+        mock_client.get_teacher_feedback.return_value = {"comments": []}
+
+        get_teacher_feedback(task_id="1000099")
+
+        assert mock_client.crawl_all.call_args.kwargs["max_pages"] == 10
+        assert mock_client.find_task_by_id.call_args.kwargs["max_pages"] == 10
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            lambda: delete_submission(task_id="99999", asset_id="82189817"),
+            lambda: get_teacher_feedback(task_id="99999"),
+            lambda: submit_file(task_id="99999", file_path="/nonexistent/hw.pdf"),
+        ],
+        ids=["delete_submission", "get_teacher_feedback", "submit_file"],
+    )
+    def test_unresolvable_task_answers_with_json_not_an_exception(
+        self, mock_build_client, call
+    ):
+        """A tool that used to answer `{"error": ...}` still does.
+
+        The shared ladder refuses with a `CommandError`, which the wrapper
+        restates as an `InvalidToolInput` so the envelope a caller already parses
+        is unchanged — an exception escaping into the MCP transport would be a
+        new failure mode, not a preserved one.
+        """
+        mock, mock_client = mock_build_client
+        mock_client.crawl_all.return_value = self.EMPTY_CRAWL
+        mock_client.find_task_by_id.return_value = None
+
+        data = json.loads(call())
+
+        assert "error" in data
+        mock_client.get_tasks_by_view.assert_not_called()
 
 
 class TestGetNotificationsTool:

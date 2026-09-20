@@ -223,6 +223,80 @@ def test_view_success_still_exits_zero(capsys):
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
+def test_view_refuses_a_target_carrying_no_task_id(capsys):
+    """`view` and the MCP tools must accept the same target shapes.
+
+    The gate here used to be ``startswith("http")`` OR ``"/core_tasks/" in
+    target``, so *any* URL reached ``target.split("core_tasks/")[-1]`` — with no
+    separator present that yields the whole URL as the "id", which was then
+    handed to ``get_task_detail``. The MCP tool refused the same input. Both
+    surfaces now ask ``client.task_id_from_target``, so a class URL or an
+    unrelated link is refused before any fetch, with exit 1 and an error
+    envelope.
+    """
+    for target in (
+        "https://school.managebac.cn/student/classes/1000023",
+        "https://school.managebac.cn/student/classes/1000023/core_tasks",
+        "https://school.managebac.cn/attachments/1/leak.pdf",
+        "not-a-task-id",
+        "",
+    ):
+        client = MagicMock()
+        with (
+            patch(
+                "tahuti.__main__._build_client",
+                return_value=(_state(), client, "a@b.com"),
+            ),
+            patch("tahuti.__main__._authenticate_client"),
+            patch("tahuti.__main__.load_snapshot", return_value={}),
+            patch("tahuti.__main__.find_task_by_id", return_value=None),
+        ):
+            rc = cmd_view(_ViewArgs(id=None, target=target))
+
+        assert rc == EXIT_FAILURE, f"view accepted {target!r}"
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is False
+        assert payload["command"] == "view"
+        assert payload["error"]["code"] in ("missing_target", "invalid_target")
+        # Refused before any detail fetch, which is the point: a garbage id used
+        # to be fetched rather than reported.
+        client.get_task_detail.assert_not_called()
+
+
+def test_view_still_reads_a_bare_id_and_a_task_url(capsys):
+    """Control: the shapes that always worked keep working, unchanged.
+
+    The shared rule accepts a bare numeric id and a URL carrying
+    ``/core_tasks/<id>``, and `view` keeps its two different fetches — a URL is
+    fetched verbatim, a bare id must find its link first.
+    """
+    client = MagicMock()
+    client.get_task_detail.return_value = {"description": "body"}
+    task_url = "https://school.managebac.cn/student/classes/1/core_tasks/123"
+    with (
+        patch("tahuti.__main__._build_client", return_value=(_state(), client, "a@b.com")),
+        patch("tahuti.__main__._authenticate_client"),
+        patch("tahuti.__main__.load_snapshot", return_value={}),
+        patch("tahuti.__main__.find_task_by_id", return_value=None),
+    ):
+        # The URL branch fetches the target verbatim, snapshot or no snapshot.
+        rc = cmd_view(_ViewArgs(id=None, target=task_url))
+        assert rc == EXIT_OK
+        client.get_task_detail.assert_called_once_with(task_url, bypass_cache=False)
+
+        # The id branch resolves a link from the snapshot before fetching.
+        client.get_task_detail.reset_mock()
+        with patch(
+            "tahuti.__main__.find_task_by_id",
+            return_value={"id": "123", "link": task_url},
+        ):
+            rc = cmd_view(_ViewArgs(id="123"))
+        assert rc == EXIT_OK
+        client.get_task_detail.assert_called_once_with(
+            task_url, from_hint=False, bypass_cache=False
+        )
+
+
 class _DownloadArgs:
     def __init__(self, tmp_path, **overrides):
         self.task_id = "123"
