@@ -30,7 +30,9 @@ DEFAULT_TTL = 900  # 15 minutes
 class ResponseCache:
     """Simple disk-based cache keyed by URL hash.
 
-    Each entry stores ``{url, status, body, timestamp}`` as a JSON file.
+    Each entry stores ``{url, status, body, timestamp}`` as a JSON file, plus
+    whatever validator the caller supplies — an ``etag`` to revalidate with, a
+    ``ttl`` of the entry's own.
     """
 
     def __init__(
@@ -53,10 +55,19 @@ class ResponseCache:
     def _path(self, url: str) -> Path:
         return self.cache_dir / f"{self._key(url)}.json"
 
-    def get(self, url: str, allow_stale: bool = False) -> tuple[str, int] | None:
-        """Return ``(body, status)`` if cached and fresh, else ``None``.
-        
-        If ``allow_stale`` is True, returns the cached value even if expired or invalidated.
+    def _read_entry(self, url: str) -> dict | None:
+        """Read and decode the entry stored for *url*, or ``None`` if there is none.
+
+        :meth:`get` and :meth:`get_entry` share this and nothing else.  They
+        agree on what "no entry" means — a disabled cache, a missing file, an
+        unreadable one, or JSON that is not an object — and they disagree about
+        what a *decoded* entry is good for, which is why the rest is not shared.
+
+        The read is a ``json.loads`` of a body that runs to 171,379 B on the
+        calendar page, so doing it twice inside one request would be the
+        expensive kind of duplication.  It was also the kind that drifts: this
+        pair had already grown apart on whether an entry with no ``"body"``
+        reads as absent or as a crash.
         """
         if not self.enabled:
             return None
@@ -67,8 +78,24 @@ class ResponseCache:
             data = json.loads(p.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return None
-        
-        is_expired = time.time() - data.get("ts", 0) > self.ttl
+        if not isinstance(data, dict):
+            return None
+        return data
+
+    def get(self, url: str, allow_stale: bool = False) -> tuple[str, int] | None:
+        """Return ``(body, status)`` if cached and fresh, else ``None``.
+
+        If ``allow_stale`` is True, returns the cached value even if expired or invalidated.
+
+        An entry may record its own ``ttl`` — see :meth:`put` — and that wins
+        over the cache's, because the two describe different horizons: the
+        webcal token outlives the 171 KB page it is scraped from.
+        """
+        data = self._read_entry(url)
+        if data is None:
+            return None
+
+        is_expired = time.time() - data.get("ts", 0) > data.get("ttl", self.ttl)
         is_invalidated = bool(data.get("invalidated", False))
 
         if (is_expired or is_invalidated) and not allow_stale:
@@ -87,17 +114,14 @@ class ResponseCache:
         Expiry and invalidation are the caller's business here.  An invalidated
         entry is returned too, because a ``304`` is precisely the evidence that
         the invalidated copy is still what the server would send.
+
+        An entry with no ``"body"`` is not an entry, so it reads as absent.
+        :meth:`get` disagrees and raises ``KeyError`` on the same file; that is
+        the one asymmetry left between the two, and it is deliberate on both
+        sides — see :meth:`_read_entry`.
         """
-        if not self.enabled:
-            return None
-        p = self._path(url)
-        if not p.exists():
-            return None
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return None
-        if not isinstance(data, dict) or "body" not in data:
+        data = self._read_entry(url)
+        if data is None or "body" not in data:
             return None
         return data
 
@@ -135,13 +159,26 @@ class ResponseCache:
             except OSError:
                 pass
 
-    def put(self, url: str, body: str, status: int, etag: str | None = None) -> None:
+    def put(
+        self,
+        url: str,
+        body: str,
+        status: int,
+        etag: str | None = None,
+        ttl: int | None = None,
+    ) -> None:
         """Write a response to the cache.
 
         *etag* is recorded when the server sent one, and omitted from the entry
-        entirely when it did not.  The key set is therefore not fixed, and a
-        caller that stores no validator writes exactly the four keys it always
-        did.
+        entirely when it did not.  *ttl* is the entry's own lifetime and is
+        recorded the same way: a value's useful horizon is not always the
+        cache's, and the webcal token — 36 characters scraped out of a 171 KB
+        page — outlives the page that carries it.  Recording it on the entry
+        keeps that in one cache object instead of a second one that has to be
+        re-synced by hand every time ``client.cache`` is replaced.
+
+        The key set is therefore not fixed, and a caller that stores neither
+        validator writes exactly the four keys it always did.
         """
         if not self.enabled:
             return
@@ -154,6 +191,11 @@ class ResponseCache:
         }
         if etag:
             data["etag"] = etag
+        # `is not None`, not truthiness: an entry TTL of 0 means "expires at
+        # once", which is as deliberate as the cache-level 0 and must not fall
+        # back to self.ttl.
+        if ttl is not None:
+            data["ttl"] = ttl
         p = self._path(url)
         # Create 0600 from birth via a temp file, then atomically replace —
         # avoids any window where cached grade pages/JWTs are world-readable.

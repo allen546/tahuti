@@ -1341,7 +1341,9 @@ class TestCachedWebcalToken:
 
     Measured: the token was byte-identical across samples 901 s apart while the
     page body rotated on every render and the session cookie rotated between
-    samples.  So the token is cached separately from the page, at the user's TTL.
+    samples.  So the token's entry is written with a TTL of its own, longer
+    than the page's, in the same cache as the page — one object, so there is no
+    second one to keep in step with the first.
     """
 
     TOKEN_KEY = "https://myschool.managebac.cn/student/calendar?__derived__=webcal_url"
@@ -1377,9 +1379,31 @@ class TestCachedWebcalToken:
                 text="BEGIN:VCALENDAR",
             )
             client.get_ical_feed()
-            entry = client._derived_cache.get_entry(self.TOKEN_KEY)
+            entry = client.cache.get_entry(self.TOKEN_KEY)
             assert entry is not None
             assert entry["body"].endswith("abc123.ics")
+
+    def test_the_entry_records_its_own_longer_ttl(self, client, sample_calendar_page_html):
+        """The mechanism: the TTL travels with the entry.
+
+        The second-cache version froze `ttl`, `cache_dir` and `enabled` onto a
+        mirror object once, in ``__init__``, and nothing re-established them
+        when ``client.cache`` was later replaced — which two other test modules
+        do.  Recording the TTL on the entry cannot go stale that way.
+        """
+        with rm.Mocker() as m:
+            m.get(
+                "https://myschool.managebac.cn/student/calendar",
+                text=sample_calendar_page_html,
+            )
+            m.get(
+                "https://managebac.com/student/events/token/abc123.ics",
+                text="BEGIN:VCALENDAR",
+            )
+            client.get_ical_feed()
+            entry = client.cache.get_entry(self.TOKEN_KEY)
+            assert entry["ttl"] == client.cache.ttl * 24
+            assert entry["ttl"] > client.cache.ttl
 
     def test_a_rotated_token_recovers_from_the_page(self, client, sample_calendar_page_html):
         """The probe covered 901 s and could not rule out a longer cadence, so a
@@ -1402,8 +1426,8 @@ class TestCachedWebcalToken:
             assert "VCALENDAR" in client.get_ical_feed()
 
             # The token the server has since rotated: the feed now 404s.  The
-            # derived cache is left fresh, so the only page fetch is the
-            # recovery one.
+            # token's own TTL is still running, so the only page fetch is the
+            # recovery one — the cached token was tried first and failed.
             client.cache.ttl = 0
             out = client.get_ical_feed()
             assert "VCALENDAR" in out
@@ -1425,10 +1449,9 @@ class TestCachedWebcalToken:
                 text="BEGIN:VCALENDAR",
             )
             client.get_ical_feed()
-            assert client._derived_cache.get_entry(self.TOKEN_KEY) is not None
+            assert client.cache.get_entry(self.TOKEN_KEY) is not None
             client.cache.clear()
-            assert client._derived_cache.get_entry(self.TOKEN_KEY) is None
-
+            assert client.cache.get_entry(self.TOKEN_KEY) is None
 
     def test_the_token_outlives_the_page_ttl(self, client, sample_calendar_page_html):
         """The whole point: sharing one TTL would expire them together and
@@ -1454,14 +1477,26 @@ class TestCachedWebcalToken:
             # The feed itself was revalidated, not re-downloaded.
             assert m.call_count == 1
 
-    def test_the_derived_cache_shares_the_directory(self, client):
-        """So `logout`'s clear() sweeps the token too."""
-        assert client._derived_cache.cache_dir == client.cache.cache_dir
+    def test_a_disabled_cache_re_derives_the_token(self, client, sample_calendar_page_html):
+        """`--refresh` turns the response cache off; the token must go with it.
 
-    def test_the_derived_cache_follows_the_enabled_flag(self, client):
-        """`--refresh` disables the response cache; the token must go too."""
-        client.cache.enabled = False
-        client._derived_cache.enabled = False
-        assert client._derived_cache.get(
-            "https://myschool.managebac.cn/student/calendar?__derived__=webcal_url"
-        ) is None
+        The old mirror object carried its own `enabled`, copied across once in
+        ``__init__``, so a cache replaced afterwards could leave a live token
+        behind a disabled one.  One object cannot.
+        """
+        with rm.Mocker() as m:
+            m.get(
+                "https://myschool.managebac.cn/student/calendar",
+                text=sample_calendar_page_html,
+            )
+            m.get(
+                "https://managebac.com/student/events/token/abc123.ics",
+                text="BEGIN:VCALENDAR",
+            )
+            client.get_ical_feed()
+            client.cache.enabled = False
+            client.get_ical_feed()
+            pages = [
+                r for r in m.request_history if r.path == "/student/calendar"
+            ]
+            assert len(pages) == 2, "a disabled cache still served the token"

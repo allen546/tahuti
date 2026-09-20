@@ -146,6 +146,128 @@ class TestTTL:
         assert body == "new"
 
 
+# ── Per-entry TTL ─────────────────────────────────────────────────────────
+
+
+class TestPerEntryTTL:
+    """An entry may carry a lifetime of its own.
+
+    The webcal token is the case for it: 36 characters scraped out of 171 KB of
+    HTML that cannot be revalidated, so it is stable on a longer horizon than
+    the page is cheap to re-fetch.  It used to need a second cache object to
+    hold that horizon, which had to be re-synced by hand whenever the first was
+    replaced.  Recording the TTL on the entry makes it structural.
+    """
+
+    def test_an_entry_ttl_overrides_the_cache_ttl(self, tmp_path: Path):
+        cache = ResponseCache(cache_dir=tmp_path, ttl=1, enabled=True)
+        cache.put("https://example.com", "body", 200, ttl=3600)
+        assert cache.get("https://example.com") == ("body", 200)
+
+    def test_an_entry_ttl_of_zero_expires_immediately(self, tmp_path: Path):
+        """0 is a real value, not "absent" — it must not fall back to self.ttl."""
+        cache = ResponseCache(cache_dir=tmp_path, ttl=3600, enabled=True)
+        cache.put("https://example.com", "body", 200, ttl=0)
+        assert cache.get("https://example.com") is None
+
+    def test_no_entry_ttl_falls_back_to_the_cache_ttl(self, tmp_path: Path):
+        """Every existing caller omits it and must be unaffected."""
+        cache = ResponseCache(cache_dir=tmp_path, ttl=0, enabled=True)
+        cache.put("https://example.com", "body", 200)
+        assert cache.get("https://example.com") is None
+
+    def test_the_entry_ttl_survives_a_later_shortening_of_the_cache_ttl(
+        self, tmp_path: Path
+    ):
+        """The property the second cache object could not express: its TTL was
+        frozen at construction, so replacing `client.cache` left a stale mirror."""
+        cache = ResponseCache(cache_dir=tmp_path, ttl=3600, enabled=True)
+        cache.put("https://example.com", "body", 200, ttl=3600)
+        cache.ttl = 0
+        assert cache.get("https://example.com") == ("body", 200)
+
+    def test_an_entry_with_neither_validator_writes_four_keys(self, tmp_path: Path):
+        """The key set stays variable: no etag and no ttl, exactly the four."""
+        cache = ResponseCache(cache_dir=tmp_path, enabled=True)
+        cache.put("https://example.com", "body", 200)
+        data = json.loads((tmp_path / f"{cache._key('https://example.com')}.json").read_text())
+        assert set(data.keys()) == {"url", "body", "status", "ts"}
+
+    def test_etag_and_ttl_are_recorded_together(self, tmp_path: Path):
+        cache = ResponseCache(cache_dir=tmp_path, enabled=True)
+        cache.put("https://example.com", "body", 200, etag='W/"x"', ttl=60)
+        data = json.loads((tmp_path / f"{cache._key('https://example.com')}.json").read_text())
+        assert set(data.keys()) == {"url", "body", "status", "ts", "etag", "ttl"}
+        assert data["etag"] == 'W/"x"'
+        assert data["ttl"] == 60
+
+    def test_the_entry_ttl_governs_allow_stale_too(self, tmp_path: Path):
+        """`allow_stale` ignores expiry, so it must ignore the entry's as well
+        — otherwise an expired entry would be unreadable even when asked for."""
+        cache = ResponseCache(cache_dir=tmp_path, ttl=3600, enabled=True)
+        cache.put("https://example.com", "body", 200, ttl=0)
+        assert cache.get("https://example.com", allow_stale=True) == ("body", 200)
+
+    def test_invalidate_keeps_the_entry_ttl(self, tmp_path: Path):
+        """Invalidation rewrites ts and the flag; it must not drop the entry's
+        own lifetime on the way through."""
+        cache = ResponseCache(cache_dir=tmp_path, ttl=3600, enabled=True)
+        cache.put("https://example.com", "body", 200, ttl=60)
+        cache.invalidate("https://example.com")
+        data = json.loads((tmp_path / f"{cache._key('https://example.com')}.json").read_text())
+        assert data["ttl"] == 60
+        assert data["invalidated"] is True
+
+
+# ── get and get_entry share one read ──────────────────────────────────────
+
+
+class TestSharedReadPath:
+    """``get`` and ``get_entry`` used to copy each other's read path, and had
+    already drifted on what a decoded entry is good for.  They now share
+    :meth:`ResponseCache._read_entry` and disagree about exactly one thing,
+    which is deliberate on both sides and pinned here.
+    """
+
+    def test_json_that_is_not_an_object_reads_as_absent(self, tmp_path: Path):
+        """``null``, ``[]`` and ``"x"`` are valid JSON and not an entry.
+
+        ``get`` used to raise ``AttributeError`` on these — ``None.get("ts", 0)``
+        — because it read the file inline while ``get_entry`` guarded.  The
+        shared read guards for both, so a file that decodes to a non-object
+        reads as absent exactly as the ``JSONDecodeError`` case already did.
+        """
+        cache = ResponseCache(cache_dir=tmp_path, enabled=True)
+        key = cache._key("https://example.com")
+        for text in ("null", "[]", '"x"', "42", "true"):
+            (tmp_path / f"{key}.json").write_text(text)
+            assert cache.get("https://example.com") is None, text
+            assert cache.get_entry("https://example.com") is None, text
+
+    def test_an_entry_with_no_body_is_absent_to_get_entry_but_not_to_get(
+        self, tmp_path: Path
+    ):
+        """The one asymmetry that is kept, not a bug to be tidied away.
+
+        ``get`` returns a ``(body, status)`` pair and raises ``KeyError`` when
+        either half is missing, which two tests in :class:`TestFileSystem` pin.
+        ``get_entry`` hands the whole dict to a caller that will look for
+        ``etag`` itself, so for it a body-less file is simply not an entry.
+
+        Collapsing the two would mean either crashing the conditional-request
+        path on a truncated entry or silently serving a ``None`` body through
+        the HTML path, and neither is worth the symmetry.
+        """
+        cache = ResponseCache(cache_dir=tmp_path, enabled=True)
+        key = cache._key("https://example.com")
+        (tmp_path / f"{key}.json").write_text(
+            json.dumps({"url": "x", "status": 200, "ts": time.time()})
+        )
+        assert cache.get_entry("https://example.com") is None
+        with pytest.raises(KeyError):
+            cache.get("https://example.com")
+
+
 # ── Disabled cache ───────────────────────────────────────────────────────
 
 

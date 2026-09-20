@@ -62,16 +62,6 @@ class SessionExpiredError(RuntimeError):
 # stop into a silently wrong result.
 _NEVER_MASK_ERRORS = (CommandError, SessionExpiredError)
 
-# How much longer a value *derived* from a page may outlive that page's cache
-# entry.  The webcal token is the only such value.  It was measured
-# byte-identical across samples 901 s apart — two full default TTL windows —
-# while the page body rotated on every render and the session cookie rotated
-# between samples, so it is stable on a longer horizon than the page is cheap to
-# re-fetch.  901 s is the bound of the evidence, not of the token's lifetime, so
-# `_webcal_url` recovers by re-deriving from a fresh page if a stale token is
-# ever rejected.
-DERIVED_TTL_MULTIPLIER = 24
-
 
 def _school_display_tz(moment: Any = None) -> Any:
     """The timezone ManageBac's human-readable dates are written in.
@@ -564,17 +554,6 @@ class ManageBacClient:
         self.session.verify = verify
         self.student_name: str | None = None
         self.cache = cache or ResponseCache()
-        # A value derived from a page gets its own, longer TTL, because the
-        # page's TTL is the wrong unit for it.  The webcal token is the case in
-        # point: it is 36 characters scraped out of 171 KB of HTML that cannot
-        # be revalidated, so sharing one TTL would expire the two together and
-        # re-fetch all 171 KB to re-read a value that has not changed.  Same
-        # directory, so `logout`'s clear() still sweeps it.  See _webcal_url.
-        self._derived_cache = ResponseCache(
-            cache_dir=self.cache.cache_dir,
-            ttl=self.cache.ttl * DERIVED_TTL_MULTIPLIER,
-            enabled=self.cache.enabled,
-        )
         # Clamped: `--retry` is a plain int with no floor, and `range(retry + 1)`
         # on a negative value never runs the loop body, so the retry wrapper fell
         # through to `raise last_exc` with `last_exc` still None —
@@ -1976,23 +1955,30 @@ class ManageBacClient:
     def _webcal_url(self, refresh: bool = False) -> str:
         """The iCal feed URL, reusing the cached token when one is still fresh.
 
-        The page that yields the token is 171 KB of HTML that cannot be
+        The page that yields the token is 171,379 B of HTML that cannot be
         revalidated, and its only product is a 36-character token.  Measured:
         the token was byte-identical across samples 901 s apart — two full TTL
         windows — while the page body rotated on every render and the session
         cookie rotated between samples, so its stability is not an artifact of
-        an unchanging session.  Caching it turns ~16 MB/day of page fetches into
-        one, at the user's own TTL.
+        an unchanging session.
+
+        So the entry is written with a TTL of its own, twenty-four of the
+        page's, rather than sharing the page's: sharing one would expire them
+        together and re-fetch all 171 KB to re-read a 36-character value.  What
+        that buys is cadence-dependent and worth stating plainly — 92 avoided
+        fetches a day (~15 MB) at a 15-minute cadence, 20 (~3.4 MB) hourly, and
+        nothing at all at a daily one, where the page is fetched once either
+        way.
 
         The cache key names the page the token came from, so the entry lives in
         the same directory as every other cached credential and is cleared by
-        ``logout``.  Its TTL is deliberately longer than the page's — sharing
-        one would expire them together and re-fetch all 171 KB to re-read a
-        36-character value.
+        ``logout``.  901 s is the bound of the evidence, not of the token's
+        lifetime, so a token the server has since rotated costs one wasted
+        request rather than a broken command — see :meth:`get_ical_feed`.
         """
         key = f"{self.base}/student/calendar?__derived__=webcal_url"
         if not refresh:
-            hit = self._derived_cache.get(key)
+            hit = self.cache.get(key)
             if hit is not None:
                 return hit[0]
 
@@ -2001,7 +1987,10 @@ class ManageBacClient:
         if not link:
             raise RuntimeError("Could not find webcal link on calendar page")
         ical_url = link["href"].replace("webcal://", "https://")
-        self._derived_cache.put(key, ical_url, 200)
+        # The longer TTL rides on the entry, not on a second cache object: it is
+        # computed from `self.cache` at the moment of writing, so replacing that
+        # cache later — which the tests do — cannot leave a stale copy behind.
+        self.cache.put(key, ical_url, 200, ttl=self.cache.ttl * 24)
         return ical_url
 
     def get_calendar_events(self, start: str, end: str) -> list[dict]:
