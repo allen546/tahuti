@@ -154,8 +154,10 @@ def test_delete_submission_success():
     initial_soup = _soup(HTML_UPCOMING_TASK)
     empty_soup = _soup(HTML_EMPTY_TASK)
 
-    # First call returns initial_soup; second call returns empty_soup (verification passes)
-    with patch.object(client, "_get", side_effect=[initial_soup, initial_soup, empty_soup, empty_soup]):
+    # Read 1 is delete_submission's own lookup of the task page; reads 2 and 3
+    # are the post-delete verification, which re-reads the task page and then
+    # falls back to the dropbox page when the task page shows no rows.
+    with patch.object(client, "_get", side_effect=[initial_soup, empty_soup, empty_soup]):
         # _request_with_retry validates the response URL, so the stub carries a
         # real one. It is still the same DELETE on the same session.
         client.session.request.return_value = MagicMock(
@@ -182,7 +184,7 @@ def test_delete_submission_by_filename():
     initial_soup = _soup(HTML_UPCOMING_TASK)
     empty_soup = _soup(HTML_EMPTY_TASK)
 
-    with patch.object(client, "_get", side_effect=[initial_soup, initial_soup, empty_soup, empty_soup]):
+    with patch.object(client, "_get", side_effect=[initial_soup, empty_soup, empty_soup]):
         client.session.request.return_value = MagicMock(
             status_code=200,
             url="https://testschool.managebac.cn/student/dropboxes/17874401/destroy_asset?file_id=82189817",

@@ -645,12 +645,14 @@ class TestNoPathBypassesTheHostGuard:
         )
 
         def _read_task_page(request, context):
-            # Reads 1-2 are delete_submission's own lookups (CSRF, then
-            # get_submissions); read 3 is the post-delete verification, which
-            # must see the row gone or delete_submission rightly reports failure.
+            # Read 1 is delete_submission's own lookup, which supplies the CSRF
+            # token and the dropbox id; reads 2-3 are the post-delete
+            # verification, which re-reads the task page and then the dropbox
+            # page when the task page shows no rows. The verification must see
+            # the row gone or delete_submission rightly reports failure.
             reads["n"] += 1
             context.status_code = 200
-            return self._submission_page() if reads["n"] <= 2 else empty_page
+            return self._submission_page() if reads["n"] <= 1 else empty_page
 
         def _delete(request, context):
             deletes["n"] += 1
