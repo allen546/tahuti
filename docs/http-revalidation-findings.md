@@ -218,6 +218,12 @@ the command's cold cost, and **100%** of it once the `.ics` is 304ing. At the
 amount of conditional-request cleverness touches it; only not fetching that page
 would.
 
+That 16.45 MB/day is the ceiling, not the steady state, and the ceiling is only
+reached at a cadence of 15 minutes or tighter. Caching the token at a longer TTL
+of its own saves `86400/max(cadence, 900) - 86400/max(cadence, 21600)` fetches a
+day — 92 at a 15-minute cadence, 20 hourly, and **nothing at all at a daily
+one**, where the page is fetched once either way.
+
 The single most valuable change for this command is not revalidation at all —
 it is caching the webcal token, which is a 36-character string extracted from
 171 KB of non-revalidable HTML.
@@ -284,7 +290,8 @@ entry, but the cache contract has no defence against it.
    it on that basis or not at all.
 4. **The webcal token should be cached separately from the page that yields
    it.** That is a bigger win than any revalidation, and it is independent of
-   every finding above.
+   every finding above. It is now done, as a per-entry TTL on the token's own
+   cache entry rather than a second cache object — see `_webcal_url`.
 5. **Two credentials now live in raw page bodies** — the hub JWT (class d) and
    an AWS STS token (class f). Any new cache entry needs the 0600 and
    clear-on-logout treatment `cache.py` already gives the `ResponseCache`.
