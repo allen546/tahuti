@@ -14,7 +14,13 @@ from mcp.server.fastmcp import FastMCP
 from .auth import build_client, hub_client
 from .client import parse_task_url
 from .config import own_state_refusal
-from .filters import InvalidViewError, normalize_view, result_views
+from .filters import (
+    InvalidViewError,
+    filter_result_by_status,
+    filter_result_by_subject,
+    normalize_view,
+    result_views,
+)
 from .notifications import MNNHubClient
 
 log = logging.getLogger(__name__)
@@ -228,8 +234,8 @@ def list_tasks(
         retry: Max retries with exponential backoff (default 3, 0=off)
     """
     # Validate before any network call: an unrecognised view used to match none
-    # of the three section checks below, so the tool answered with three empty
-    # lists and total_count 0 — a valid-looking "you have no homework".
+    # of the three section checks, so the tool answered with three empty lists
+    # and total_count 0 — a valid-looking "you have no homework".
     try:
         canonical_view = normalize_view(view)
     except InvalidViewError as exc:
@@ -260,50 +266,37 @@ def list_tasks(
     result = client.crawl_all(max_pages=pages, fetch_details=details)
     views = result_views(result, canonical_view)
 
+    # The filtering is the CLI's own, not a second copy of it. Six three-line
+    # blocks used to reimplement `filter_result_by_status` here, and subject
+    # reimplemented `matches_subject` with `str.lower()` where the shared helper
+    # casefolds — so a subject that only casefold-matches ("fussball" against a
+    # class named "Fußball") matched in `tahuti list` and missed here. Same
+    # class of bug as the crawl-source note above, on the filtering half.
+    #
+    # `filter_result_by_status` takes exactly these five filters and applies
+    # each only when its argument is not None, so `graded=None` is still "no
+    # filter". It has no `subject` parameter, so subject stays the CLI's
+    # separate call. `views` is a fresh dict and the payload below names its
+    # keys explicitly, so neither helper's bookkeeping (`summary`,
+    # `subject_filter`) can reach the tool's output.
+    if subject:
+        views = filter_result_by_subject(views, subject)
+
+    # `completed` folds the CLI's `--completed`/`--todo` pair into one tri-state,
+    # so callers keep the "completed only / todo only" semantics rather than
+    # having to know which helper to reach for.
+    views = filter_result_by_status(
+        views,
+        graded=graded,
+        submitted=submitted,
+        grade=grade,
+        tag=tag,
+        completed=completed,
+    )
+
     upcoming = views["upcoming"]
     past = views["past"]
     overdue = views["overdue"]
-
-    if subject:
-        def _match(task, s) -> bool:
-            cn = task.get("class_name", "")
-            return s.lower() in cn.lower() if cn else False
-
-        upcoming = [t for t in upcoming if _match(t, subject)]
-        past = [t for t in past if _match(t, subject)]
-        overdue = [t for t in overdue if _match(t, subject)]
-
-    from .filters import matches_graded, matches_submitted, matches_grade_query
-
-    if graded is not None:
-        upcoming = [t for t in upcoming if matches_graded(t, graded)]
-        past = [t for t in past if matches_graded(t, graded)]
-        overdue = [t for t in overdue if matches_graded(t, graded)]
-
-    if submitted is not None:
-        upcoming = [t for t in upcoming if matches_submitted(t, submitted)]
-        past = [t for t in past if matches_submitted(t, submitted)]
-        overdue = [t for t in overdue if matches_submitted(t, submitted)]
-
-    if grade is not None:
-        upcoming = [t for t in upcoming if matches_grade_query(t, grade)]
-        past = [t for t in past if matches_grade_query(t, grade)]
-        overdue = [t for t in overdue if matches_grade_query(t, grade)]
-
-    if tag is not None:
-        from .filters import matches_tag
-        upcoming = [t for t in upcoming if matches_tag(t, tag)]
-        past = [t for t in past if matches_tag(t, tag)]
-        overdue = [t for t in overdue if matches_tag(t, tag)]
-
-    # Same `completed`/`todo` pair the CLI's `list` command exposes; MCP folds
-    # both into one tri-state so callers keep the "completed only / todo only"
-    # semantics rather than having to know which helper to reach for.
-    if completed is not None:
-        from .filters import matches_completed
-        upcoming = [t for t in upcoming if matches_completed(t, completed)]
-        past = [t for t in past if matches_completed(t, completed)]
-        overdue = [t for t in overdue if matches_completed(t, completed)]
 
     result = {
         "student_name": client.student_name,

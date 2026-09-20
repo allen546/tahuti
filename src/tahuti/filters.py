@@ -267,12 +267,18 @@ def result_views(result: dict, requested_view: str) -> dict:
 
     Uses the same validated vocabulary as the MCP ``list_tasks`` tool: an
     unrecognised *requested_view* raises :class:`InvalidViewError` rather than
-    quietly degrading to "all".
+    quietly degrading to "all".  A name that is already canonical is taken as
+    given — the MCP tool normalises it up front so it can fail before it crawls,
+    and re-running the alias table on the answer is repetition, not validation.
 
     Raises:
         InvalidViewError: if *requested_view* is not a recognised view.
     """
-    view = normalize_view(requested_view)
+    view = (
+        requested_view
+        if requested_view in CANONICAL_VIEWS
+        else normalize_view(requested_view)
+    )
     return {
         "upcoming": result["upcoming"] if view in ("all", "upcoming") else [],
         "past": result["past"] if view in ("all", "past") else [],

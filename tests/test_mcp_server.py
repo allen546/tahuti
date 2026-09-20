@@ -2,13 +2,34 @@
 
 from __future__ import annotations
 
+import importlib
 import json
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Ensure worktree src is prioritized over editable installs in venv — the same
+# preamble tests/test_client.py carries. Without it this file can silently test
+# the main checkout's copy: the editable install's `.pth` names *its* src, so
+# whichever module imports `tahuti` first decides what every later module sees,
+# and in a worktree that is not the code under test.
+worktree_src = str(Path(__file__).resolve().parent.parent / "src")
+if sys.path[0] != worktree_src:
+    sys.path.insert(0, worktree_src)
+
+import tahuti
+
+tahuti_pkg_dir = str(Path(worktree_src) / "tahuti")
+if hasattr(tahuti, "__path__") and tahuti_pkg_dir not in tahuti.__path__:
+    tahuti.__path__.insert(0, tahuti_pkg_dir)
+
+if "tahuti.mcp_server" in sys.modules:
+    importlib.reload(sys.modules["tahuti.mcp_server"])
+
 from tahuti.client import ManageBacClient
+from tahuti.filters import result_views
 from tahuti.mcp_server import (
     _error_payload,
     _sanitize_error,
@@ -172,6 +193,24 @@ class TestListTasksTool:
         assert len(data["upcoming"]) == len(data["past"]) == len(data["overdue"]) == 1
         assert mock_client.crawl_all.call_count == 2
 
+    def test_the_validated_view_is_the_one_result_views_receives(
+        self, mock_build_client
+    ):
+        """The view is normalised once, up front, and that answer is reused.
+
+        The validation call has to happen before `build_client` so a bad view
+        costs no network call; `result_views` used to run the alias table a
+        second time on the value the tool had already canonicalised.
+        """
+        mock, mock_client = mock_build_client
+        mock_client.crawl_all.return_value = self._crawl(upcoming=[{"t": 1}])
+        with patch(
+            "tahuti.mcp_server.result_views", wraps=result_views
+        ) as result_views_spy:
+            list_tasks(view="Upcoming")
+        result_views_spy.assert_called_once()
+        assert result_views_spy.call_args.args[1] == "upcoming"
+
     def test_list_tasks_with_subject(self, mock_build_client):
         mock, mock_client = mock_build_client
         mock_client.crawl_all.return_value = self._crawl(
@@ -185,6 +224,27 @@ class TestListTasksTool:
         assert len(data["upcoming"]) == 1
         assert data["upcoming"][0]["title"] == "T1"
 
+    def test_subject_matching_is_the_shared_casefold_one(self, mock_build_client):
+        """`list_tasks` must not keep a private copy of `filters.matches_subject`.
+
+        The inline matcher this tool carried compared with `str.lower()`, which
+        leaves "ß" as "ß"; `filters.matches_subject` casefolds, which maps it to
+        "ss". A class stored as "Fußball" was therefore invisible to a student
+        typing "fussball" here while `tahuti list` found it — the two
+        implementations could drift on non-ASCII input, and only an ASCII
+        "Math" case pinned them together.
+        """
+        mock, mock_client = mock_build_client
+        mock_client.crawl_all.return_value = self._crawl(
+            upcoming=[
+                {"id": "1", "title": "T1", "class_name": "Fußball"},
+                {"id": "2", "title": "T2", "class_name": "Math HL"},
+            ]
+        )
+        data = json.loads(list_tasks(subject="fussball"))
+        assert [t["title"] for t in data["upcoming"]] == ["T1"]
+        assert data["summary"]["total_count"] == 1
+
     def test_list_tasks_with_tag(self, mock_build_client):
         mock, mock_client = mock_build_client
         mock_client.crawl_all.return_value = self._crawl(
@@ -197,6 +257,55 @@ class TestListTasksTool:
         data = json.loads(result)
         assert len(data["upcoming"]) == 1
         assert data["upcoming"][0]["title"] == "T1"
+
+    @pytest.mark.parametrize(
+        "filter_kwargs,expected_ids",
+        [
+            ({}, ["1", "2", "3"]),
+            ({"graded": True}, ["1"]),
+            ({"graded": False}, ["2", "3"]),
+            ({"submitted": True}, ["1"]),
+            ({"submitted": False}, ["2", "3"]),
+            ({"grade": "A+"}, ["1"]),
+            ({"grade": "4.0"}, ["1"]),
+            ({"tag": "Summative"}, ["3"]),
+            ({"completed": True}, ["1"]),
+            ({"completed": False}, ["2", "3"]),
+            # A filter is applied only when its argument is not None, so an
+            # explicit None must not narrow the result.
+            ({"graded": None, "submitted": None}, ["1", "2", "3"]),
+            ({"graded": True, "completed": True}, ["1"]),
+        ],
+    )
+    def test_status_filters_come_from_the_shared_helpers(
+        self, mock_build_client, filter_kwargs, expected_ids
+    ):
+        """The five status filters are `filters.filter_result_by_status`'s.
+
+        The CLI's `list` command applies exactly these through that one call, so
+        the tool cannot answer differently for the same combination. This pins
+        the delegation the six inline blocks were replaced by.
+        """
+        mock, mock_client = mock_build_client
+        mock_client.crawl_all.return_value = self._crawl(
+            upcoming=[
+                {
+                    "id": "1", "title": "T1", "class_name": "Math HL",
+                    "status": "submitted", "grade_letter": "A+",
+                },
+                {
+                    "id": "2", "title": "T2", "class_name": "Math HL",
+                    "status": "not-submitted",
+                },
+                {
+                    "id": "3", "title": "T3", "class_name": "English A",
+                    "status": "not-submitted", "labels": ["Summative"],
+                },
+            ]
+        )
+        data = json.loads(list_tasks(**filter_kwargs))
+        assert [t["id"] for t in data["upcoming"]] == expected_ids
+        assert data["summary"]["total_count"] == len(expected_ids)
 
 
 class TestViewTaskTool:
