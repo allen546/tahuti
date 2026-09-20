@@ -136,11 +136,39 @@ genuine content edit on any other byte still changes the hash, because the
 transforms are narrow. So the blind spot is precisely "something changed only
 inside a credential or an instrumentation value," which is not content.
 
-> **Caveat on scope.** Three fetches roughly ten seconds apart cannot rule out
-> a nonce on a longer cadence — per-session, per-hour, per-day. A
-> high-entropy census (uuid / hex32 / `eyJ…` / base64-40+ / `X-Amz` / unix
-> timestamp) across those fetches found only constants surviving. Treat the
-> six-class list as complete for a single session, not as proven for all time.
+> **Completeness — there is no seventh class, and this is provable rather than
+> merely unobserved.** The normalized sha256 is identical across all 3 fetches
+> of all 4 pages. If any byte differed outside a transformed span, the hashes
+> would differ. Therefore **not one byte** outside classes (a)–(f) varies, and
+> every raw difference between two renders lies inside one of them.
+>
+> A character-level diff corroborates it from the other direction. The differing
+> opcodes fall into clean bands at the *same offsets on every page* — 81384,
+> 87672, 101723 — which is what a byte-stable page shell with a few rotating
+> slots looks like:
+>
+> | Offset band (in the first body) | Class |
+> |---|---|
+> | ~359–361 | (a) NREUM `applicationTime` |
+> | ~81384–81397 | (b) `autologout` meta |
+> | ~87672–87758 | (c) `csrf-token` meta |
+> | ~101723–101898 | (d) notifications-bell `data-token` JWT |
+> | ~125014–125537 | (e) `custom-pattern-<uuid>` ×14 (`core_tasks` only) |
+> | ~150662 | (f) S3 pre-signed URL (`core_tasks` only) |
+>
+> Read the opcode counts with care: two different Rails CSRF tokens share
+> base64 alphabet characters, so `difflib` fragments the diff into dozens of
+> spurious 1–2 character pairs. Line-level diffing is the honest view; the
+> character-level one is misleading read directly.
+>
+> **Caveat on scope.** Three fetches roughly ten seconds apart cannot rule out a
+> nonce on a longer cadence — per-session, per-hour, per-day. The completeness
+> argument above is sound for the observed timescale only. A high-entropy
+> census (uuid / hex32 / base64-40+ / `X-Amz` / unix timestamp) across those
+> fetches found three candidates surviving normalization as constants —
+> `x-bg-uid`, `data-airbrake-project-key`, and the New Relic
+> `NRJS-…`/`applicationID`/`agentID` values. Re-check those first if a hash ever
+> drifts over hours rather than seconds.
 
 ## Where revalidation is worth adopting
 

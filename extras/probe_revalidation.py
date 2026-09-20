@@ -264,6 +264,19 @@ def q2_q3_hash(p: Probe, class_ids: list[str]) -> dict[str, list[str]]:
         verdict = "STABLE" if len(set(hs)) == 1 else "UNSTABLE"
         print(f"    {g:<14} {verdict}  distinct={len(set(hs))}")
 
+    # Completeness.  If the normalized hash is identical across every fetch of
+    # every page, then not one byte outside a transformed span varies - so every
+    # raw difference between two renders lies inside one of classes (a)-(f), and
+    # there is no seventh nonce class at this timescale.  State it rather than
+    # leaving the reader to infer it.
+    if all(len(set(v)) == 1 for v in hashes.values()):
+        print("\n  COMPLETENESS: every page's normalized hash is identical across")
+        print("  its fetches, so no byte outside a transformed span varies and every")
+        print("  raw difference lies inside one of classes (a)-(f).")
+        print("  => no seventh nonce class at this timescale.")
+        print("  Caveat: three closely-spaced fetches cannot rule out a nonce on a")
+        print("  longer cadence (per-session, per-hour, per-day).")
+
     head("Q3 - normalized-hash sensitivity")
     names = list(hashes)
     if len(names) >= 2:
