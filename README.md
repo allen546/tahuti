@@ -500,6 +500,7 @@ The MCP server exposes 14 tools: `list_tasks`, `view_task`, `submit_file`, `dele
 
 - **[Event Stream Specification](docs/events.md)**: Full specification of the event data contract, lifecycle states, and JSON payloads.
 - **[Downstream Notifier Guide](docs/downstream-notifier-guide.md)**: Operational guide for deploying `extras/mb-notifier` (Bark push alerts, 3-field / 4-line mobile screen budgeting, course aliases, and sound customization).
+- **[HTTP Revalidation Findings](docs/http-revalidation-findings.md)**: Which endpoints answer `If-None-Match` with `304` and which never can, why the server's `ETag` is useless on the Rails HTML pages, and the six nonce classes a client-side content hash has to strip to be stable.
 
 ---
 
