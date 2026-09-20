@@ -13,7 +13,7 @@ import tempfile
 from zoneinfo import ZoneInfo
 
 from ..client import ManageBacClient
-from ..config import config_dir
+from ..config import SNAPSHOT_FILENAME, config_dir
 from .events import (
     DaemonConfig,
     MBEvent,
@@ -73,7 +73,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_DAEMON_PATH = config_dir() / "daemon.json"
 DEFAULT_WEBHOOK_URL = "http://127.0.0.1:42617/webhook"
-DEFAULT_SNAPSHOT_PATH = config_dir() / "snapshot.json"
+DEFAULT_SNAPSHOT_PATH = config_dir() / SNAPSHOT_FILENAME
 
 # Empty means "no gating": the daemon polls on its interval around the clock.
 # Active hours are opt-in — either `--active-hours-start/--active-hours-end` or

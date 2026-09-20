@@ -530,6 +530,27 @@ def warn_on_weak_permissions(stream=None) -> list[str]:
 SNAPSHOT_FILENAME = "snapshot.json"
 
 
+def snapshot_path(state) -> Path:
+    """Return the snapshot file belonging to *state*'s config directory.
+
+    The snapshot lives beside the config file, so ``--config`` relocates both
+    and a non-default profile is found by the same rule as the default one.
+    This is deliberately *not* :data:`DEFAULT_SNAPSHOT_PATH`, which ignores
+    ``--config`` and is only a fallback for callers with no state at all.
+
+    The rule lives here, next to the constant it names, because two features
+    that otherwise have nothing to do with each other have to agree on the
+    filename: :func:`own_state_locations` derives this same path so `submit`
+    can refuse to upload tahuti's own snapshot, and the MCP server reads this
+    path to answer ``view_task``. Each used to spell the name itself — one
+    through the constant, one as a bare literal — so nothing tied the file the
+    containment rule protects to the file the MCP server reads. Renaming the
+    snapshot would have moved one and left the other looking at a name that no
+    longer exists, which reads as an empty snapshot rather than as an error.
+    """
+    return state.config_path.parent / SNAPSHOT_FILENAME
+
+
 def _as_path(value: object) -> Path | None:
     """Coerce *value* to a :class:`~pathlib.Path`, or ``None`` if it is not path-like.
 

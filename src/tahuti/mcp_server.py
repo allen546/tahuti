@@ -16,6 +16,8 @@ from .client import task_id_from_target
 from .config import own_state_refusal
 from .filters import InvalidViewError, normalize_view, result_views, summary_of
 from .exceptions import CommandError
+from .client import parse_task_url
+from .config import own_state_refusal, snapshot_path
 from .filters import InvalidViewError, normalize_view, result_views
 from .notifications import MNNHubClient
 
@@ -349,9 +351,16 @@ def _snapshot_path_for(state) -> Path:
 
     The snapshot is written beside the config file, so this follows a
     non-default profile's location.  ``DEFAULT_SNAPSHOT_PATH`` only names the
-    default one, and the CLI's ``_snapshot_path`` is private to ``__main__``.
+    default one.
+
+    Delegates to :func:`tahuti.config.snapshot_path` rather than restating the
+    filename.  This used to spell ``"snapshot.json"`` out by hand while the
+    CLI's ``_snapshot_path`` took it from the constant — which left the file
+    read here and the file ``submit`` refuses to upload as own state as two
+    independent decisions.  See that function's docstring for why they cannot
+    be allowed to drift apart.
     """
-    return state.config_path.parent / "snapshot.json"
+    return snapshot_path(state)
 
 
 @mcp.tool()
