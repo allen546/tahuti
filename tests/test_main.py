@@ -438,15 +438,10 @@ class TestMainGrades:
         monkeypatch.setenv("MANAGEBAC_SESSION", str(tmp_path / "session.json"))
 
         mock_client = MagicMock()
-        mock_client.crawl_all.return_value = {
-            "upcoming": [{"class_name": "Math", "link": "/student/classes/100/c/1"}],
-            "past": [],
-            "overdue": [],
-            "student_name": "X",
-            "school": "s",
-            "base_url": "u",
-            "crawled_at": "t",
-        }
+        # The roster is the dashboard scrape, the one `crawl_all` itself
+        # discovers classes with. Deriving it from task links dropped every
+        # class with no tasks, because an empty class has no link to parse.
+        mock_client.get_classes.return_value = {"100": "Math"}
         mock_client.get_class_grades.return_value = {
             "tasks": [],
             "categories": [],
@@ -462,6 +457,10 @@ class TestMainGrades:
                         with pytest.raises(SystemExit) as exc_info:
                             main(["grades", "--format", "json"])
                         assert exc_info.value.code == 0
+
+        # Answering "which classes exist" from the dashboard costs one request,
+        # not a full crawl of every class page plus the notification hub.
+        mock_client.crawl_all.assert_not_called()
 
     def test_grades_with_class_id(self, tmp_path: Path, monkeypatch):
         monkeypatch.setenv("MANAGEBAC_CONFIG", str(tmp_path / "config.json"))
