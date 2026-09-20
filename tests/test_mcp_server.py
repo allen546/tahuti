@@ -58,18 +58,48 @@ class TestMcpServerSetup:
 
 
 class TestListTasksTool:
+    """`list_tasks` must take its tasks from the CLI's source, not a second one.
+
+    The CLI's `list` command calls `client.crawl_all` (classes discovered from
+    the dashboard, then each class's core_tasks page). This tool used to call
+    `client.get_tasks_by_view` (the `tasks_and_deadlines` pages), which is a
+    second, overlapping source of the same tasks — so the two surfaces could
+    report different sets. These tests pin the shared source.
+    """
+
+    @staticmethod
+    def _crawl(**sections):
+        """A `crawl_all` return value with only the named sections populated."""
+        base = {"upcoming": [], "past": [], "overdue": []}
+        base.update(sections)
+        return base
+
     def test_list_tasks(self, mock_build_client):
         mock, mock_client = mock_build_client
-        mock_client.get_tasks_by_view.side_effect = lambda view, max_pages: (
-            [{"id": "1", "title": "T1", "class_name": "Math"}] if view == "upcoming" else []
+        mock_client.crawl_all.return_value = self._crawl(
+            upcoming=[{"id": "1", "title": "T1", "class_name": "Math"}]
         )
         result = list_tasks()
         data = json.loads(result)
         assert "upcoming" in data
         assert len(data["upcoming"]) == 1
 
+    def test_uses_the_cli_task_source(self, mock_build_client):
+        """The divergence fix: `crawl_all`, never the per-view crawl."""
+        mock, mock_client = mock_build_client
+        mock_client.crawl_all.return_value = self._crawl()
+        list_tasks()
+        mock_client.crawl_all.assert_called_once()
+        mock_client.get_tasks_by_view.assert_not_called()
+
+    def test_pages_and_details_are_forwarded_to_crawl_all(self, mock_build_client):
+        mock, mock_client = mock_build_client
+        mock_client.crawl_all.return_value = self._crawl()
+        list_tasks(pages=3, details=True)
+        mock_client.crawl_all.assert_called_once_with(max_pages=3, fetch_details=True)
+
     @pytest.mark.parametrize(
-        "view,fetched_views",
+        "view,reported_views",
         [
             ("all", ["upcoming", "past", "overdue"]),
             ("upcoming", ["upcoming"]),
@@ -81,18 +111,27 @@ class TestListTasksTool:
             ("overdue tasks", ["overdue"]),
         ],
     )
-    def test_recognised_views_crawl_only_that_section(
-        self, mock_build_client, view, fetched_views
+    def test_view_filters_the_report_not_the_crawl(
+        self, mock_build_client, view, reported_views
     ):
+        """`view` is a display filter, exactly as the CLI's `--view` is.
+
+        `crawl_all` crawls every view regardless, so one crawl_all call is made
+        for every value of `view` — the CLI cannot crawl one section without the
+        others either.
+        """
         mock, mock_client = mock_build_client
-        mock_client.get_tasks_by_view.side_effect = lambda v, max_pages: [
-            {"id": v, "title": v, "class_name": "Math"}
-        ]
+        mock_client.crawl_all.return_value = self._crawl(
+            upcoming=[{"id": "upcoming", "title": "u", "class_name": "Math"}],
+            past=[{"id": "past", "title": "p", "class_name": "Math"}],
+            overdue=[{"id": "overdue", "title": "o", "class_name": "Math"}],
+        )
         result = list_tasks(view=view)
         data = json.loads(result)
-        called = [c.args[0] for c in mock_client.get_tasks_by_view.call_args_list]
-        assert called == fetched_views
-        assert data["summary"]["total_count"] == len(fetched_views)
+        assert mock_client.crawl_all.call_count == 1
+        for name in ("upcoming", "past", "overdue"):
+            assert len(data[name]) == (1 if name in reported_views else 0)
+        assert data["summary"]["total_count"] == len(reported_views)
         assert "error" not in data
 
     @pytest.mark.parametrize("view", ["al", "upcomingg", "todo", "homework", "1"])
@@ -103,17 +142,17 @@ class TestListTasksTool:
         # so every list stayed empty and the tool reported total_count 0 — a
         # valid-looking "this student has no homework".
         mock, mock_client = mock_build_client
-        mock_client.get_tasks_by_view.side_effect = lambda v, max_pages: [
-            {"id": "1", "title": "T1", "class_name": "Math"}
-        ]
+        mock_client.crawl_all.return_value = self._crawl(
+            upcoming=[{"id": "1", "title": "T1", "class_name": "Math"}]
+        )
         result = list_tasks(view=view)
         data = json.loads(result)
         assert "error" in data
         assert view in data["error"]
         assert "tasks" not in data
         # No crawl may happen for a view we already know is invalid.
-        mock_client.get_tasks_by_view.assert_not_called()
         mock_client.crawl_all.assert_not_called()
+        mock_client.get_tasks_by_view.assert_not_called()
 
     def test_unrecognised_view_error_names_valid_views(self, mock_build_client):
         mock, _client = mock_build_client
@@ -121,20 +160,25 @@ class TestListTasksTool:
         for view in ("all", "upcoming", "past", "overdue"):
             assert view in data["error"]
 
-    def test_default_view_crawls_all_sections(self, mock_build_client):
+    def test_default_view_reports_all_sections(self, mock_build_client):
         mock, mock_client = mock_build_client
-        mock_client.get_tasks_by_view.return_value = []
+        mock_client.crawl_all.return_value = self._crawl(
+            upcoming=[{"id": "1", "title": "u", "class_name": "Math"}],
+            past=[{"id": "2", "title": "p", "class_name": "Math"}],
+            overdue=[{"id": "3", "title": "o", "class_name": "Math"}],
+        )
         list_tasks()
-        called = [c.args[0] for c in mock_client.get_tasks_by_view.call_args_list]
-        assert called == ["upcoming", "past", "overdue"]
+        data = json.loads(list_tasks())
+        assert len(data["upcoming"]) == len(data["past"]) == len(data["overdue"]) == 1
+        assert mock_client.crawl_all.call_count == 2
 
     def test_list_tasks_with_subject(self, mock_build_client):
         mock, mock_client = mock_build_client
-        mock_client.get_tasks_by_view.side_effect = lambda view, max_pages: (
-            [
+        mock_client.crawl_all.return_value = self._crawl(
+            upcoming=[
                 {"id": "1", "title": "T1", "class_name": "Math HL"},
                 {"id": "2", "title": "T2", "class_name": "English A"},
-            ] if view == "upcoming" else []
+            ]
         )
         result = list_tasks(subject="Math")
         data = json.loads(result)
@@ -143,11 +187,11 @@ class TestListTasksTool:
 
     def test_list_tasks_with_tag(self, mock_build_client):
         mock, mock_client = mock_build_client
-        mock_client.get_tasks_by_view.side_effect = lambda view, max_pages: (
-            [
+        mock_client.crawl_all.return_value = self._crawl(
+            upcoming=[
                 {"id": "1", "title": "T1", "class_name": "Math HL", "labels": ["Summative"]},
                 {"id": "2", "title": "T2", "class_name": "English A", "labels": ["Formative"]},
-            ] if view == "upcoming" else []
+            ]
         )
         result = list_tasks(tag="Summative")
         data = json.loads(result)
@@ -568,22 +612,37 @@ class TestGetTimetableTool:
 
 
 class TestListClassesTool:
+    """`list_classes` reports the dashboard roster, not a task-link derivation.
+
+    Deriving the roster from task links — which is what this did — drops every
+    class with no tasks, because an empty class contributes no link to parse.
+    It also cost a full crawl to answer a question the dashboard already
+    answers.
+    """
+
     def test_list_classes(self, mock_build_client):
         mock, mock_client = mock_build_client
-        mock_client.crawl_all.return_value = {
-            "upcoming": [
-                {"class_name": "Math", "link": "/student/classes/100/c/1"},
-                {"class_name": "English", "link": "/student/classes/200/c/2"},
-            ],
-            "past": [],
-            "overdue": [],
-        }
+        mock_client.get_classes.return_value = {"100": "Math", "200": "English"}
         result = list_classes()
         data = json.loads(result)
         assert len(data["classes"]) == 2
         ids = {c["id"] for c in data["classes"]}
         assert "100" in ids
         assert "200" in ids
+
+    def test_uses_the_dashboard_roster(self, mock_build_client):
+        mock, mock_client = mock_build_client
+        mock_client.get_classes.return_value = {}
+        list_classes()
+        mock_client.get_classes.assert_called_once()
+        mock_client.crawl_all.assert_not_called()
+
+    def test_class_with_no_tasks_is_still_listed(self, mock_build_client):
+        """The regression this fixes: an empty class has no task link to parse."""
+        mock, mock_client = mock_build_client
+        mock_client.get_classes.return_value = {"300": "Physics (empty)"}
+        data = json.loads(list_classes())
+        assert [c["name"] for c in data["classes"]] == ["Physics (empty)"]
 
 
 class TestGetClassGradesTool:
@@ -601,11 +660,7 @@ class TestGetClassGradesTool:
 
     def test_grades_by_name(self, mock_build_client):
         mock, mock_client = mock_build_client
-        mock_client.crawl_all.return_value = {
-            "upcoming": [{"class_name": "Math HL", "link": "/student/classes/100/c/1"}],
-            "past": [],
-            "overdue": [],
-        }
+        mock_client.get_classes.return_value = {"100": "Math HL"}
         mock_client.get_class_grades.return_value = {
             "tasks": [],
             "categories": [],
@@ -615,13 +670,27 @@ class TestGetClassGradesTool:
         data = json.loads(result)
         assert data["class_id"] == "100"
 
+    def test_grades_by_name_uses_the_dashboard_roster(self, mock_build_client):
+        """Resolving a name must agree with what `list_classes` reports."""
+        mock, mock_client = mock_build_client
+        mock_client.get_classes.return_value = {"100": "Math HL"}
+        mock_client.get_class_grades.return_value = {"tasks": [], "expected_grade": None}
+        get_class_grades(class_name="Math")
+        mock_client.get_classes.assert_called_once()
+        mock_client.crawl_all.assert_not_called()
+
+    def test_grades_by_name_resolves_a_class_with_no_tasks(
+        self, mock_build_client
+    ):
+        mock, mock_client = mock_build_client
+        mock_client.get_classes.return_value = {"300": "Physics"}
+        mock_client.get_class_grades.return_value = {"tasks": [], "expected_grade": None}
+        data = json.loads(get_class_grades(class_name="Physics"))
+        assert data["class_id"] == "300"
+
     def test_grades_class_not_found(self, mock_build_client):
         mock, mock_client = mock_build_client
-        mock_client.crawl_all.return_value = {
-            "upcoming": [{"class_name": "Math", "link": "/student/classes/100/c/1"}],
-            "past": [],
-            "overdue": [],
-        }
+        mock_client.get_classes.return_value = {"100": "Math"}
         result = get_class_grades(class_name="Physics")
         data = json.loads(result)
         assert "error" in data
@@ -657,11 +726,7 @@ class TestGetClassGradesTool:
 
     def test_grades_no_params(self, mock_build_client):
         mock, mock_client = mock_build_client
-        mock_client.crawl_all.return_value = {
-            "upcoming": [{"class_name": "Math", "link": "/student/classes/100/c/1"}],
-            "past": [],
-            "overdue": [],
-        }
+        mock_client.get_classes.return_value = {"100": "Math"}
         mock_client.get_class_grades.return_value = {
             "tasks": [],
             "categories": [],
@@ -671,6 +736,14 @@ class TestGetClassGradesTool:
         result = get_class_grades()
         data = json.loads(result)
         assert "classes_grades" in data
+        mock_client.crawl_all.assert_not_called()
+
+    def test_grades_no_params_covers_a_class_with_no_tasks(self, mock_build_client):
+        mock, mock_client = mock_build_client
+        mock_client.get_classes.return_value = {"300": "Physics"}
+        mock_client.get_class_grades.return_value = {"tasks": [], "expected_grade": None}
+        data = json.loads(get_class_grades())
+        assert "300" in data["classes_grades"]
 
 
 class TestCountGradeFrequenciesTool:

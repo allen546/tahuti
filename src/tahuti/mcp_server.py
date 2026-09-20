@@ -5,9 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
 import re
-import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -16,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 from .auth import build_client, hub_client
 from .client import parse_task_url
 from .config import own_state_refusal
-from .filters import InvalidViewError, normalize_view
+from .filters import InvalidViewError, normalize_view, result_views
 from .notifications import MNNHubClient
 
 log = logging.getLogger(__name__)
@@ -246,34 +244,25 @@ def list_tasks(
         retry=retry,
     )
 
-    upcoming = []
-    past = []
-    overdue = []
+    # One canonical view drives which sections are *reported*, so the MCP tool
+    # and filters.result_views can no longer disagree about what a view means.
+    #
+    # The task source is `crawl_all`, the same one the CLI's `list` command uses:
+    # classes discovered from the dashboard, then each class's core_tasks page.
+    # The per-view `tasks_and_deadlines` crawl this replaces is a second,
+    # overlapping source of the same tasks, so the two surfaces could report
+    # different sets — and a class whose tasks only appear on its own
+    # core_tasks page would be missing here entirely.
+    #
+    # `view` is therefore a display filter over the result, not a crawl
+    # selector — exactly the CLI's `--view` contract. Asking for one view still
+    # crawls all three, because `crawl_all` does and the CLI's does too.
+    result = client.crawl_all(max_pages=pages, fetch_details=details)
+    views = result_views(result, canonical_view)
 
-    # One canonical view drives which sections are crawled, so the MCP tool and
-    # filters.result_views can no longer disagree about what a view means.
-    sections: dict[str, list] = {"upcoming": [], "past": [], "overdue": []}
-    for name in sections:
-        if canonical_view not in ("all", name):
-            continue
-        log.info("Crawling %s tasks...", name)
-        sections[name] = client.get_tasks_by_view(name, max_pages=pages)
-
-    upcoming = sections["upcoming"]
-    past = sections["past"]
-    overdue = sections["overdue"]
-
-    if details:
-        items = [t for t in upcoming + past + overdue if t.get("link")]
-        log.info("Fetching details for %d tasks...", len(items))
-        for i, task in enumerate(items):
-            detail = client.get_task_detail(task["link"])
-            if detail:
-                task["detail"] = detail
-            if (i + 1) % 5 == 0:
-                log.info("  detail %d/%d", i + 1, len(items))
-            if i < len(items) - 1:
-                time.sleep(random.uniform(0.5, 2.0))
+    upcoming = views["upcoming"]
+    past = views["past"]
+    overdue = views["overdue"]
 
     if subject:
         def _match(task, s) -> bool:
@@ -1014,15 +1003,14 @@ def list_classes(
         verify=verify_tls,
         retry=retry,
     )
-    result = client.crawl_all(max_pages=5, fetch_details=False)
-    seen: dict[str, str] = {}
-    for task in result["upcoming"] + result["past"] + result["overdue"]:
-        link = task.get("link", "")
-        m = re.search(r"/student/classes/(\d+)/", link)
-        cname = task.get("class_name", "")
-        if m and cname:
-            seen[m.group(1)] = cname
-    classes = [{"id": cid, "name": cname} for cid, cname in seen.items()]
+    # The roster `crawl_all` itself uses to discover classes: the dashboard
+    # scrape (`client.get_classes`). Deriving it from task links instead — which
+    # is what this did, and what `tahuti grades` still does locally — silently
+    # drops every class with no tasks, because an empty class contributes no
+    # link to parse. It also cost a full crawl (dashboard, every class page and
+    # the notification hub) to answer a question the dashboard already answers.
+    classes_map = client.get_classes()
+    classes = [{"id": cid, "name": cname} for cid, cname in classes_map.items()]
     return json.dumps({"classes": classes}, indent=2, ensure_ascii=False)
 
 
@@ -1070,14 +1058,10 @@ def get_class_grades(
     )
 
     if not class_id and class_name:
-        result = client.crawl_all(max_pages=5, fetch_details=False)
-        seen: dict[str, str] = {}
-        for task in result["upcoming"] + result["past"] + result["overdue"]:
-            link = task.get("link", "")
-            m = re.search(r"/student/classes/(\d+)/", link)
-            cname = task.get("class_name", "")
-            if m and cname:
-                seen[m.group(1)] = cname
+        # Same roster `list_classes` reports and `crawl_all` discovers with.
+        # Resolving a name from task links instead would contradict both: a
+        # class `list_classes` lists would be "not found" here.
+        seen = client.get_classes()
         for cid, cname in seen.items():
             if class_name.lower() in cname.lower():
                 class_id = cid
@@ -1092,15 +1076,8 @@ def get_class_grades(
 
     if not class_id:
         # Default to loading grades for all classes
-        result = client.crawl_all(max_pages=5, fetch_details=False)
-        seen = {}
-        for task in result["upcoming"] + result["past"] + result["overdue"]:
-            link = task.get("link", "")
-            m = re.search(r"/student/classes/(\d+)/", link)
-            cname = task.get("class_name", "")
-            if m and cname:
-                seen[m.group(1)] = cname
-        
+        seen = client.get_classes()
+
         all_grades = {}
         for cid, cname in seen.items():
             try:
