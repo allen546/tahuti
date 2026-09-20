@@ -2789,8 +2789,25 @@ class ManageBacClient:
         self,
         max_pages: int = 10,
         fetch_details: bool = False,
+        fetch_notifications: bool = True,
     ) -> dict:
-        """Crawl all tasks by compiling from active classes core_tasks pages."""
+        """Crawl all tasks by compiling from active classes core_tasks pages.
+
+        ``fetch_notifications`` controls the MNN-hub block, which costs three
+        HTTP requests (the ``/student/notifications`` page for the endpoint and
+        JWT, then the hub's ``stats`` and ``notifications`` endpoints).  The
+        default is ``True`` because ``crawl_all`` is public API documented in
+        ``docs/library.md``: flipping it would silently stop every third-party
+        caller that reads the key from getting it.  Callers that only want the
+        three task sections pass ``False`` and save the three requests — the
+        ``notifications`` key is still returned, defaulted, so no caller sees a
+        missing key and has to start defending against one.
+
+        The daemon is the caller that must *not* pass ``False``: its
+        ``diff_index`` reads ``new["notifications"]["unread_count"]`` to raise
+        the ``new_notifications`` alert, and it reads that off this method's
+        return value.
+        """
         log.info("Discovering classes from dashboard...")
         classes = {}
         try:
@@ -2823,12 +2840,18 @@ class ManageBacClient:
                 except Exception as e:
                     log.warning("Failed to crawl tasks for class %s: %s", class_name, e)
 
-        # Retrieve notifications
+        # Retrieve notifications.  Skipped when the caller does not read the
+        # key, because these three requests are the single most expensive
+        # optional part of a crawl and are otherwise fetched, parsed and
+        # dropped.  The key stays in the return value either way — defaulted
+        # here rather than omitted — so a caller that starts reading it after
+        # an upgrade does not have to defend against its absence first.
         notifications: dict = {"unread_count": 0, "items": []}
-        try:
-            notifications = self._fetch_notifications()
-        except Exception as exc:
-            log.warning("notifications fetch failed: %s", exc)
+        if fetch_notifications:
+            try:
+                notifications = self._fetch_notifications()
+            except Exception as exc:
+                log.warning("notifications fetch failed: %s", exc)
 
         if fetch_details:
             items = [t for t in upcoming + past + overdue if t.get("link")]

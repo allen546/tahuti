@@ -291,7 +291,13 @@ def list_tasks(
     # `view` is therefore a display filter over the result, not a crawl
     # selector — exactly the CLI's `--view` contract. Asking for one view still
     # crawls all three, because `crawl_all` does and the CLI's does too.
-    result = client.crawl_all(max_pages=pages, fetch_details=details)
+    # `fetch_notifications=False`: `result_views` slices only the three task
+    # sections and the payload below names its seven keys explicitly, so the
+    # tool never reads `notifications`.  The MCP surface that does is the
+    # separate `get_notifications` tool, which fetches the hub itself.
+    result = client.crawl_all(
+        max_pages=pages, fetch_details=details, fetch_notifications=False
+    )
     views = result_views(result, canonical_view)
 
     # The filtering is the CLI's own, not a second copy of it. Six three-line

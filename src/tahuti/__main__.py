@@ -661,7 +661,15 @@ def cmd_list(args) -> int:
         # Fetch fresh results. An explicit --pages narrows the crawl, so the
         # merge must not read absence from it as a deletion.
         partial = args.pages is not None
-        new_result = client.crawl_all(max_pages=pages, fetch_details=details)
+        # `fetch_notifications=False`: `merge_snapshot` returns only the seven
+        # task/identity keys and drops `notifications`, and the result dict
+        # built below names its keys explicitly, so nothing downstream of here
+        # reads it.  The three MNN-hub requests were being made and discarded on
+        # every cold `list` run.  `tahuti notifications` is the command that
+        # surfaces them, and it fetches them itself.
+        new_result = client.crawl_all(
+            max_pages=pages, fetch_details=details, fetch_notifications=False
+        )
         # Merge with local snapshot and save
         merged_result = merge_snapshot(
             old_snapshot, new_result, client=client, partial=partial
@@ -1326,8 +1334,13 @@ def _resolve_task_ids(
             if cid and tid:
                 return cid, tid
 
-    # 2. Fall back to crawling
-    result = client.crawl_all(max_pages=pages, fetch_details=False)
+    # 2. Fall back to crawling.  `fetch_notifications=False`: this resolves a
+    # task id, so it reads only the three task sections, and a resolution that
+    # has to reach the network at all is already the slow path — spending three
+    # more requests on a hub payload it will not look at is pure waste.
+    result = client.crawl_all(
+        max_pages=pages, fetch_details=False, fetch_notifications=False
+    )
     for task in result["upcoming"] + result["past"] + result["overdue"]:
         if task.get("id") == task_id:
             cid, tid = parse_task_url(task.get("link", ""))

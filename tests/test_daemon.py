@@ -312,6 +312,71 @@ class TestRunDaemonOnce:
         assert real["delivered"] is True
         assert real["alert_count"] >= 1
 
+    def test_the_daemon_still_fetches_notifications(
+        self, tmp_path: Path, make_crawl_result
+    ):
+        """`run_daemon_once` must not opt out of the notification fetch.
+
+        `diff_index` reads ``new["notifications"]["unread_count"]`` to raise the
+        ``new_notifications`` alert, so passing ``fetch_notifications=False``
+        here would zero that count and silence the alert entirely.  Every other
+        test in this class hands `crawl_all` a mocked return value, so nothing
+        else in the suite would notice — the call signature is the only place
+        this is observable, which is why it is asserted exactly rather than by
+        "the kwarg is absent".
+
+        The keyword is deliberately *not* forwarded, so ``crawl_all``'s default
+        of ``True`` stays in force for this one caller.
+        """
+        snapshot_path = tmp_path / "snapshot.json"
+        snapshot_path.write_text(json.dumps({"upcoming": [], "past": [], "overdue": []}))
+        daemon_config = {
+            "delivery": {"mode": "webhook", "webhook_url": "http://localhost:9999/webhook"},
+            "snapshot_file": str(snapshot_path),
+            "verify_tls": True,
+        }
+
+        mock_client = MagicMock()
+        mock_client.crawl_all.return_value = make_crawl_result(
+            upcoming=[{"id": "1", "title": "T1", "class_name": "Math"}],
+        )
+
+        run_daemon_once(mock_client, daemon_config, dry_run=True)
+        assert mock_client.crawl_all.call_args.kwargs == {
+            "max_pages": 10,
+            "fetch_details": False,
+        }
+
+    def test_a_rising_unread_count_still_raises_the_alert(
+        self, tmp_path: Path, make_crawl_result
+    ):
+        """The behavioural half of the guarantee the test above pins.
+
+        With the notification payload present in the crawl result, `diff_index`
+        must still raise ``new_notifications`` — proving the daemon's alerting
+        really does depend on the key `run_daemon_once` asks `crawl_all` for.
+        """
+        snapshot_path = tmp_path / "snapshot.json"
+        snapshot_path.write_text(
+            json.dumps({"upcoming": [], "past": [], "overdue": [], "notifications": {"unread_count": 1}})
+        )
+        daemon_config = {
+            "delivery": {"mode": "webhook", "webhook_url": "http://localhost:9999/webhook"},
+            "snapshot_file": str(snapshot_path),
+            "verify_tls": True,
+        }
+
+        crawl = make_crawl_result(upcoming=[{"id": "1", "title": "T1", "class_name": "Math"}])
+        crawl["notifications"] = {"unread_count": 3, "items": []}
+
+        mock_client = MagicMock()
+        mock_client.crawl_all.return_value = crawl
+
+        result = run_daemon_once(mock_client, daemon_config, dry_run=True)
+        types = [a["type"] for a in result["alerts"]]
+        assert "new_notifications" in types
+        assert any("2 new notification(s)" in a["message"] for a in result["alerts"])
+
 
 class TestStartLoop:
     def _make_daemon_config(self, tmp_path: Path):

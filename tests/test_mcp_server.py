@@ -120,7 +120,15 @@ class TestListTasksTool:
         mock, mock_client = mock_build_client
         mock_client.crawl_all.return_value = self._crawl()
         list_tasks(pages=3, details=True)
-        mock_client.crawl_all.assert_called_once_with(max_pages=3, fetch_details=True)
+        # `fetch_notifications=False` is asserted rather than left implicit: it
+        # is the whole point of the kwarg's existence at this call site. The
+        # tool never reads `notifications`, so it must stop paying for the three
+        # MNN-hub requests — but the *default* stays True for un-audited callers,
+        # which means a future refactor that drops the kwarg here fails this
+        # assertion instead of quietly reintroducing the cost.
+        mock_client.crawl_all.assert_called_once_with(
+            max_pages=3, fetch_details=True, fetch_notifications=False
+        )
 
     @pytest.mark.parametrize(
         "view,reported_views",

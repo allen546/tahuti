@@ -518,6 +518,53 @@ class TestCrawlAll:
             assert "detail" in result["upcoming"][0]
             assert "error" not in result["upcoming"][0]["detail"]
 
+    def test_notifications_are_fetched_by_default(
+        self, client, sample_tasks_page_html_no_next
+    ):
+        """`True` is the default because `crawl_all` is documented public API.
+
+        A caller that has not been audited — including a third-party one reading
+        `docs/library.md` — must keep getting the hub payload it always got.
+        Flipping this default to force call sites to opt in would silently break
+        them, so the default is pinned here rather than left to inference.
+        """
+        with rm.Mocker() as m:
+            m.get(re.compile(r"view=upcoming"), text=sample_tasks_page_html_no_next)
+            m.get(re.compile(r"view=past"), text="<html></html>")
+            m.get(re.compile(r"view=overdue"), text="<html></html>")
+            with patch.object(
+                client,
+                "_fetch_notifications",
+                return_value={"unread_count": 2, "items": []},
+            ) as spy:
+                result = client.crawl_all(max_pages=1, fetch_details=False)
+        spy.assert_called_once()
+        assert result["notifications"] == {"unread_count": 2, "items": []}
+
+    def test_fetch_notifications_false_skips_the_hub_but_keeps_the_key(
+        self, client, sample_tasks_page_html_no_next
+    ):
+        """The opt-out saves the three MNN-hub requests and nothing else.
+
+        The key is still returned, defaulted, so a caller that starts reading it
+        after an upgrade does not first have to defend against its absence. That
+        is what makes the opt-out safe to add at all: it changes the request
+        count, never the shape of the return value.
+        """
+        with rm.Mocker() as m:
+            m.get(re.compile(r"view=upcoming"), text=sample_tasks_page_html_no_next)
+            m.get(re.compile(r"view=past"), text="<html></html>")
+            m.get(re.compile(r"view=overdue"), text="<html></html>")
+            with patch.object(client, "_fetch_notifications") as spy:
+                result = client.crawl_all(
+                    max_pages=1, fetch_details=False, fetch_notifications=False
+                )
+        spy.assert_not_called()
+        assert result["notifications"] == {"unread_count": 0, "items": []}
+        # The task sections are untouched by the opt-out.
+        assert len(result["upcoming"]) == 1
+        assert result["summary"]["upcoming_count"] == 1
+
 
 class TestGetCalendarEvents:
     def test_returns_events(self, client):

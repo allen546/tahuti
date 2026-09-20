@@ -470,6 +470,15 @@ def run_daemon_once(
 ) -> dict:
     snapshot_path = Path(daemon_config["snapshot_file"]).expanduser()
     old = load_snapshot(snapshot_path)
+    # Deliberately still fetching notifications (the `crawl_all` default).  The
+    # three MNN-hub requests are *not* waste here: `diff_index` below reads
+    # `new["notifications"]["unread_count"]` and raises the `new_notifications`
+    # alert when it climbs, so passing `fetch_notifications=False` would zero
+    # that count and the daemon would stop reporting new notifications
+    # entirely — silently, because every `run_daemon_once` test passes a mocked
+    # client whose `crawl_all` return value is fixed, so no assertion would
+    # catch it.  `save_snapshot` also persists the key, and the next cycle's
+    # `diff_index` reads it back as `old`.
     result = client.crawl_all(max_pages=10, fetch_details=False)
     alerts = _diff_snapshots_full(old, result)
 
