@@ -1242,3 +1242,226 @@ class TestCalendarEventUrl:
             _absolute_event_url("https://x.cn", "https://other.test/e")
             == "https://other.test/e"
         )
+
+
+class TestConditionalRevalidation:
+    """`_get_revalidating` — the only place If-None-Match is wired in.
+
+    The Rails HTML pages never 304 (their ETag is a digest of a body that
+    rotates every render), so this must not reach `_get`.  These two endpoints
+    were measured to answer 304, with a bogus ETag returning 200 as the
+    negative control.
+    """
+
+    URL = "https://myschool.managebac.cn/student/events.json?start=2026-04-29&end=2026-05-05"
+
+    def _prime(self, client, body="[]", etag='W/"aaa"'):
+        client.cache.put(self.URL, body, 200, etag)
+
+    def _expire(self, client):
+        """Age the entry past its TTL so the next read must revalidate."""
+        client.cache.ttl = 0
+
+    def test_a_fresh_entry_costs_no_request(self, client):
+        with rm.Mocker() as m:
+            m.get(self.URL, json=[])
+            client.get_calendar_events("2026-04-29", "2026-05-05")
+            assert m.call_count == 1
+            # Second call inside the TTL: served from disk.
+            client.get_calendar_events("2026-04-29", "2026-05-05")
+            assert m.call_count == 1
+
+    def test_a_stale_entry_sends_if_none_match(self, client):
+        with rm.Mocker() as m:
+            m.get(self.URL, json=[], headers={"ETag": 'W/"aaa"'})
+            client.get_calendar_events("2026-04-29", "2026-05-05")
+            self._expire(client)
+            m.reset_mock()
+            m.get(self.URL, json=[])
+            client.get_calendar_events("2026-04-29", "2026-05-05")
+            sent = m.request_history[-1].headers.get("If-None-Match")
+            assert sent == 'W/"aaa"', sent
+
+    def test_a_304_replays_the_stored_body(self, client):
+        with rm.Mocker() as m:
+            m.get(self.URL, json=[{"id": 7, "title": "Kept"}])
+            client.get_calendar_events("2026-04-29", "2026-05-05")
+            self._expire(client)
+            m.reset_mock()
+            # 304 with a zero-byte body: the answer must come from the cache.
+            m.get(self.URL, status_code=304, text="")
+            events = client.get_calendar_events("2026-04-29", "2026-05-05")
+            assert [e["id"] for e in events] == [7]
+            assert m.call_count == 1
+
+    def test_a_304_stores_nothing_new(self, client):
+        """A 304 must not overwrite the entry it just validated."""
+        with rm.Mocker() as m:
+            m.get(self.URL, json=[{"id": 7}])
+            client.get_calendar_events("2026-04-29", "2026-05-05")
+            before = client.cache.get_entry(self.URL)["ts"]
+            self._expire(client)
+            m.reset_mock()
+            m.get(self.URL, status_code=304, text="")
+            client.get_calendar_events("2026-04-29", "2026-05-05")
+            assert client.cache.get_entry(self.URL)["ts"] == before
+
+    def test_a_changed_body_replaces_the_entry_and_its_etag(self, client):
+        with rm.Mocker() as m:
+            m.get(self.URL, json=[{"id": 1}])
+            client.get_calendar_events("2026-04-29", "2026-05-05")
+            self._expire(client)
+            m.reset_mock()
+            m.get(self.URL, json=[{"id": 2}], headers={"ETag": 'W/"bbb"'})
+            events = client.get_calendar_events("2026-04-29", "2026-05-05")
+            assert [e["id"] for e in events] == [2]
+            entry = client.cache.get_entry(self.URL)
+            assert entry["etag"] == 'W/"bbb"'
+
+    def test_no_stored_etag_means_no_conditional_header(self, client):
+        """A first-ever fetch must not send an empty If-None-Match."""
+        with rm.Mocker() as m:
+            m.get(self.URL, json=[])
+            client.get_calendar_events("2026-04-29", "2026-05-05")
+            assert "If-None-Match" not in m.request_history[-1].headers
+
+    def test_the_html_path_never_sends_it(self, client, sample_timetable_html):
+        """`_get` must stay unconditional — that is the whole finding."""
+        with rm.Mocker() as m:
+            m.get(
+                re.compile(r"https://myschool\.managebac\.cn/student/timetables"),
+                text=sample_timetable_html,
+            )
+            client.get_timetable()
+            assert "If-None-Match" not in m.request_history[-1].headers
+
+
+class TestCachedWebcalToken:
+    """The 171 KB calendar page exists to yield a 36-character token.
+
+    Measured: the token was byte-identical across samples 901 s apart while the
+    page body rotated on every render and the session cookie rotated between
+    samples.  So the token is cached separately from the page, at the user's TTL.
+    """
+
+    TOKEN_KEY = "https://myschool.managebac.cn/student/calendar?__derived__=webcal_url"
+
+    def test_the_page_is_fetched_once_per_ttl(self, client, sample_calendar_page_html):
+        with rm.Mocker() as m:
+            m.get(
+                "https://myschool.managebac.cn/student/calendar",
+                text=sample_calendar_page_html,
+            )
+            m.get(
+                "https://managebac.com/student/events/token/abc123.ics",
+                text="BEGIN:VCALENDAR",
+            )
+            client.get_ical_feed()
+            assert m.call_count == 2  # page + ics
+            client.get_ical_feed()
+            # Neither is re-fetched: both the token and the feed are cached.
+            assert m.call_count == 2
+            pages = [
+                r for r in m.request_history if r.path == "/student/calendar"
+            ]
+            assert len(pages) == 1
+
+    def test_the_token_is_stored_under_a_key_naming_its_page(self, client, sample_calendar_page_html):
+        with rm.Mocker() as m:
+            m.get(
+                "https://myschool.managebac.cn/student/calendar",
+                text=sample_calendar_page_html,
+            )
+            m.get(
+                "https://managebac.com/student/events/token/abc123.ics",
+                text="BEGIN:VCALENDAR",
+            )
+            client.get_ical_feed()
+            entry = client._derived_cache.get_entry(self.TOKEN_KEY)
+            assert entry is not None
+            assert entry["body"].endswith("abc123.ics")
+
+    def test_a_rotated_token_recovers_from_the_page(self, client, sample_calendar_page_html):
+        """The probe covered 901 s and could not rule out a longer cadence, so a
+        stale token must cost one wasted request rather than a broken command."""
+        with rm.Mocker() as m:
+            m.get(
+                "https://myschool.managebac.cn/student/calendar",
+                text=sample_calendar_page_html,
+            )
+            # A sequence, not three registrations: the last registration would
+            # win and the 404 would never be seen.
+            m.get(
+                "https://managebac.com/student/events/token/abc123.ics",
+                [
+                    {"text": "BEGIN:VCALENDAR", "status_code": 200},
+                    {"text": "not found", "status_code": 404},
+                    {"text": "BEGIN:VCALENDAR", "status_code": 200},
+                ],
+            )
+            assert "VCALENDAR" in client.get_ical_feed()
+
+            # The token the server has since rotated: the feed now 404s.  The
+            # derived cache is left fresh, so the only page fetch is the
+            # recovery one.
+            client.cache.ttl = 0
+            out = client.get_ical_feed()
+            assert "VCALENDAR" in out
+            # The page was re-fetched to re-derive the token.
+            pages = [
+                r for r in m.request_history if r.path == "/student/calendar"
+            ]
+            assert len(pages) == 2
+
+    def test_logout_clears_the_token(self, client, sample_calendar_page_html, tmp_path):
+        """It is a credential-ish value, so it must not outlive the session."""
+        with rm.Mocker() as m:
+            m.get(
+                "https://myschool.managebac.cn/student/calendar",
+                text=sample_calendar_page_html,
+            )
+            m.get(
+                "https://managebac.com/student/events/token/abc123.ics",
+                text="BEGIN:VCALENDAR",
+            )
+            client.get_ical_feed()
+            assert client._derived_cache.get_entry(self.TOKEN_KEY) is not None
+            client.cache.clear()
+            assert client._derived_cache.get_entry(self.TOKEN_KEY) is None
+
+
+    def test_the_token_outlives_the_page_ttl(self, client, sample_calendar_page_html):
+        """The whole point: sharing one TTL would expire them together and
+        re-fetch all 171 KB to re-read a 36-character value."""
+        with rm.Mocker() as m:
+            m.get(
+                "https://myschool.managebac.cn/student/calendar",
+                text=sample_calendar_page_html,
+            )
+            m.get(
+                "https://managebac.com/student/events/token/abc123.ics",
+                text="BEGIN:VCALENDAR",
+            )
+            client.get_ical_feed()
+            # Only the page/feed TTL lapses.
+            client.cache.ttl = 0
+            m.reset_mock()
+            client.get_ical_feed()
+            pages = [
+                r for r in m.request_history if r.path == "/student/calendar"
+            ]
+            assert pages == [], "the 171 KB page was re-fetched for its token"
+            # The feed itself was revalidated, not re-downloaded.
+            assert m.call_count == 1
+
+    def test_the_derived_cache_shares_the_directory(self, client):
+        """So `logout`'s clear() sweeps the token too."""
+        assert client._derived_cache.cache_dir == client.cache.cache_dir
+
+    def test_the_derived_cache_follows_the_enabled_flag(self, client):
+        """`--refresh` disables the response cache; the token must go too."""
+        client.cache.enabled = False
+        client._derived_cache.enabled = False
+        assert client._derived_cache.get(
+            "https://myschool.managebac.cn/student/calendar?__derived__=webcal_url"
+        ) is None

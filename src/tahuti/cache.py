@@ -75,6 +75,32 @@ class ResponseCache:
             return None
         return data["body"], data["status"]
 
+    def get_entry(self, url: str) -> dict | None:
+        """Return the whole cached entry, or ``None``.
+
+        :meth:`get` returns a ``(body, status)`` pair because that is all the
+        HTML path wants.  A conditional request needs more: the stored ``etag``
+        to send, *and* the body to replay when the server answers ``304`` — and
+        by the time it runs the entry is normally past its TTL, so it has to be
+        asked for deliberately rather than through :meth:`get`.
+
+        Expiry and invalidation are the caller's business here.  An invalidated
+        entry is returned too, because a ``304`` is precisely the evidence that
+        the invalidated copy is still what the server would send.
+        """
+        if not self.enabled:
+            return None
+        p = self._path(url)
+        if not p.exists():
+            return None
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        if not isinstance(data, dict) or "body" not in data:
+            return None
+        return data
+
     def _harden_tree(self) -> None:
         """Close the cache tree to other local users, and stop there.
 
@@ -109,8 +135,14 @@ class ResponseCache:
             except OSError:
                 pass
 
-    def put(self, url: str, body: str, status: int) -> None:
-        """Write a response to the cache."""
+    def put(self, url: str, body: str, status: int, etag: str | None = None) -> None:
+        """Write a response to the cache.
+
+        *etag* is recorded when the server sent one, and omitted from the entry
+        entirely when it did not.  The key set is therefore not fixed, and a
+        caller that stores no validator writes exactly the four keys it always
+        did.
+        """
         if not self.enabled:
             return
         self._harden_tree()
@@ -120,6 +152,8 @@ class ResponseCache:
             "status": status,
             "ts": time.time()
         }
+        if etag:
+            data["etag"] = etag
         p = self._path(url)
         # Create 0600 from birth via a temp file, then atomically replace —
         # avoids any window where cached grade pages/JWTs are world-readable.

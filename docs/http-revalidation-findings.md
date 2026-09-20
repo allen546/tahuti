@@ -191,12 +191,12 @@ scrape the webcal token) and the `.ics` (14,399 B). Cold total: **185,778 B**.
 `/student/calendar` cannot be revalidated — sending its own `ETag` back returns
 200 with a new `ETag` and a non-identical body. It is therefore **92.25%** of
 the command's cold cost, and **100%** of it once the `.ics` is 304ing. At the
-900 s TTL that is roughly **16.45 MB/day** to re-read a 40-character token. No
+900 s TTL that is roughly **16.45 MB/day** to re-read a 36-character token. No
 amount of conditional-request cleverness touches it; only not fetching that page
 would.
 
 The single most valuable change for this command is not revalidation at all —
-it is caching the webcal token, which is a 40-character string extracted from
+it is caching the webcal token, which is a 36-character string extracted from
 171 KB of non-revalidable HTML.
 
 ## Auth always precedes the validator

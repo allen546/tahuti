@@ -62,6 +62,16 @@ class SessionExpiredError(RuntimeError):
 # stop into a silently wrong result.
 _NEVER_MASK_ERRORS = (CommandError, SessionExpiredError)
 
+# How much longer a value *derived* from a page may outlive that page's cache
+# entry.  The webcal token is the only such value.  It was measured
+# byte-identical across samples 901 s apart — two full default TTL windows —
+# while the page body rotated on every render and the session cookie rotated
+# between samples, so it is stable on a longer horizon than the page is cheap to
+# re-fetch.  901 s is the bound of the evidence, not of the token's lifetime, so
+# `_webcal_url` recovers by re-deriving from a fresh page if a stale token is
+# ever rejected.
+DERIVED_TTL_MULTIPLIER = 24
+
 
 def _school_display_tz(moment: Any = None) -> Any:
     """The timezone ManageBac's human-readable dates are written in.
@@ -554,6 +564,17 @@ class ManageBacClient:
         self.session.verify = verify
         self.student_name: str | None = None
         self.cache = cache or ResponseCache()
+        # A value derived from a page gets its own, longer TTL, because the
+        # page's TTL is the wrong unit for it.  The webcal token is the case in
+        # point: it is 36 characters scraped out of 171 KB of HTML that cannot
+        # be revalidated, so sharing one TTL would expire the two together and
+        # re-fetch all 171 KB to re-read a value that has not changed.  Same
+        # directory, so `logout`'s clear() still sweeps it.  See _webcal_url.
+        self._derived_cache = ResponseCache(
+            cache_dir=self.cache.cache_dir,
+            ttl=self.cache.ttl * DERIVED_TTL_MULTIPLIER,
+            enabled=self.cache.enabled,
+        )
         # Clamped: `--retry` is a plain int with no floor, and `range(retry + 1)`
         # on a negative value never runs the loop body, so the retry wrapper fell
         # through to `raise last_exc` with `last_exc` still None —
@@ -1911,33 +1932,85 @@ class ManageBacClient:
 
     # ── Calendar ────────────────────────────────────────────────────────
 
+    def _get_revalidating(self, url: str) -> str:
+        """GET *url*, answering a ``304`` from the stored body.
+
+        Worth doing only where the server actually honours ``If-None-Match``.
+        Measured on this origin: ``/student/events.json`` (200, 5,186 B -> 304,
+        0 B) and the iCal feed (200, 14,399 B -> 304, 0 B), each confirmed by a
+        bogus ETag returning 200 with the full body.  The Rails HTML pages never
+        304 — their ETag is a digest of a body that rotates on every render — so
+        this is deliberately *not* wired into :meth:`_get`.  See
+        ``docs/http-revalidation-findings.md``.
+
+        The stored ETag is what makes a ``304`` worth asking for and the stored
+        body is what makes it answerable, so both come from the same entry —
+        which by now is normally past its TTL, hence
+        :meth:`ResponseCache.get_entry` rather than ``get()``.
+        """
+        fresh = self.cache.get(url)
+        if fresh is not None:
+            return fresh[0]
+
+        lock = self._get_url_lock(url)
+        with lock:
+            fresh = self.cache.get(url)
+            if fresh is not None:
+                return fresh[0]
+
+            stale = self.cache.get_entry(url)
+            headers = {}
+            if stale and stale.get("etag"):
+                headers["If-None-Match"] = stale["etag"]
+
+            r = self._request_with_retry("GET", url, headers=headers)
+            if r.status_code == 304 and stale is not None:
+                # Unchanged.  Replay what is already held rather than treating
+                # the empty 304 body as the response.
+                return stale["body"]
+            # Same dead-logic trap as _get: check the body, not the URL.
+            self._reject_login_page(r.url, BeautifulSoup(r.text, "html.parser"))
+            self.cache.put(url, r.text, r.status_code, r.headers.get("ETag"))
+            return r.text
+
+    def _webcal_url(self, refresh: bool = False) -> str:
+        """The iCal feed URL, reusing the cached token when one is still fresh.
+
+        The page that yields the token is 171 KB of HTML that cannot be
+        revalidated, and its only product is a 36-character token.  Measured:
+        the token was byte-identical across samples 901 s apart — two full TTL
+        windows — while the page body rotated on every render and the session
+        cookie rotated between samples, so its stability is not an artifact of
+        an unchanging session.  Caching it turns ~16 MB/day of page fetches into
+        one, at the user's own TTL.
+
+        The cache key names the page the token came from, so the entry lives in
+        the same directory as every other cached credential and is cleared by
+        ``logout``.  Its TTL is deliberately longer than the page's — sharing
+        one would expire them together and re-fetch all 171 KB to re-read a
+        36-character value.
+        """
+        key = f"{self.base}/student/calendar?__derived__=webcal_url"
+        if not refresh:
+            hit = self._derived_cache.get(key)
+            if hit is not None:
+                return hit[0]
+
+        soup = self._get("/student/calendar", bypass_cache=refresh)
+        link = soup.find("a", href=re.compile(r"webcal://"))
+        if not link:
+            raise RuntimeError("Could not find webcal link on calendar page")
+        ical_url = link["href"].replace("webcal://", "https://")
+        self._derived_cache.put(key, ical_url, 200)
+        return ical_url
+
     def get_calendar_events(self, start: str, end: str) -> list[dict]:
         """Fetch calendar events for a date range via the JSON API.
 
         *start* and *end* are ``YYYY-MM-DD`` strings.
         """
         url = f"{self.base}/student/events.json?start={start}&end={end}"
-        cached = self.cache.get(url)
-        if cached is not None:
-            body, _status = cached
-            events = json.loads(body)
-        else:
-            lock = self._get_url_lock(url)
-            with lock:
-                cached = self.cache.get(url)
-                if cached is not None:
-                    body, _status = cached
-                    events = json.loads(body)
-                else:
-                    r = self._request_with_retry(
-                        "GET",
-                        f"{self.base}/student/events.json",
-                        params={"start": start, "end": end},
-                    )
-                    # Same dead-logic trap as _get: check the body, not the URL.
-                    self._reject_login_page(r.url, BeautifulSoup(r.text, "html.parser"))
-                    self.cache.put(url, r.text, r.status_code)
-                    events = r.json()
+        events = json.loads(self._get_revalidating(url))
         return [
             {
                 "id": e.get("id"),
@@ -1962,24 +2035,19 @@ class ManageBacClient:
         """Fetch the raw iCal feed content.
 
         Scrapes the calendar page to find the webcal token, then fetches the
-        iCal file via HTTP.
+        iCal file via HTTP.  Both the token and the feed are revalidated: the
+        token because the page carrying it cannot be, and the feed because the
+        server answers ``If-None-Match`` with a ``304``.
         """
-        soup = self._get("/student/calendar")
-        link = soup.find("a", href=re.compile(r"webcal://"))
-        if not link:
-            raise RuntimeError("Could not find webcal link on calendar page")
-        ical_url = link["href"].replace("webcal://", "https://")
-        cached = self.cache.get(ical_url)
-        if cached is not None:
-            return cached[0]
-        lock = self._get_url_lock(ical_url)
-        with lock:
-            cached = self.cache.get(ical_url)
-            if cached is not None:
-                return cached[0]
-            r = self._request_with_retry("GET", ical_url)
-            self.cache.put(ical_url, r.text, r.status_code)
-            return r.text
+        try:
+            return self._get_revalidating(self._webcal_url())
+        except Exception:
+            # The cached token is the one value here that can silently go
+            # stale: the probe established stability across 901 s, which cannot
+            # rule out a longer cadence.  Re-derive it from a fresh page and try
+            # once more, so a rotated token costs one wasted request instead of
+            # a broken `calendar --ical`.
+            return self._get_revalidating(self._webcal_url(refresh=True))
 
     # ── Timetable ───────────────────────────────────────────────────────
 

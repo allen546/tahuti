@@ -198,7 +198,11 @@ def q1_calendar(p: Probe) -> None:
         print("  !! no webcal link on /student/calendar")
         return
     ics_url = m.group(1).replace("webcal://", "https://")
-    print(f"  webcal token length={len(ics_url.rsplit('/', 1)[-1])} (value withheld)")
+    # The token, not the filename: the last path segment carries a trailing
+    # ".ics", so measuring it whole over-reports by four characters.
+    token = ics_url.rsplit("/", 1)[-1]
+    token = token[:-4] if token.endswith(".ics") else token
+    print(f"  webcal token length={len(token)} (value withheld)")
 
     ics1 = p.get(ics_url, "ics cold (ResponseCache bypassed)")
     p.save("ics_1.ics", ics1.text)
