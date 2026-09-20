@@ -276,6 +276,87 @@ def test_cli_submissions_delete(mock_print, mock_resolve, mock_auth, mock_build)
 
 @patch("tahuti.__main__._build_client")
 @patch("tahuti.__main__._authenticate_client")
+@patch("tahuti.__main__._resolve_task_ids", return_value=("1000001", "1000021"))
+@patch("tahuti.__main__.print_payload")
+def test_cli_submissions_add_writes_state_locally(
+    mock_print, mock_resolve, mock_auth, mock_build, tmp_path
+):
+    """`submissions --add` marks the row submitted without reading the class.
+
+    `cmd_submit` now takes this same local-write path for a task the snapshot
+    already holds, so this is the behaviour both commands share — and it was the
+    only one of the two that had a test.
+    """
+    from tahuti.__main__ import load_snapshot, save_snapshot
+
+    client = _make_client()
+    # A real config path, so the snapshot the command writes is the one below
+    # rather than a MagicMock that reads as an empty snapshot.
+    mock_build.return_value = (
+        MagicMock(active_profile="default", config_path=tmp_path / "config.json"),
+        client,
+        "test@example.com",
+    )
+    snapshot_path = tmp_path / "snapshot.json"
+    save_snapshot(
+        snapshot_path,
+        {
+            "crawled_at": "2026-09-13T12:00:00",
+            "student_name": "Test Student",
+            "school": "demo-school",
+            "base_url": "https://demo-school.managebac.cn",
+            "upcoming": [
+                {
+                    "id": "1000021",
+                    "title": "kinematics classwork1",
+                    "class_name": "AP Physics 1",
+                    "due_date": "Dec 13, 5:55 PM",
+                    "link": "https://demo-school.managebac.cn/student/classes/1000001/core_tasks/1000021",
+                    "status": "not-submitted",
+                    "has_submit_button": True,
+                    "labels": ["Formative", "Pending"],
+                }
+            ],
+            "past": [],
+            "overdue": [],
+        },
+    )
+    (tmp_path / "work.pdf").write_bytes(b"%PDF-test")
+
+    parser = build_parser()
+    args = parser.parse_args(["submissions", "1000021", "--add", str(tmp_path / "work.pdf")])
+    with (
+        patch.object(
+            client,
+            "submit_file",
+            return_value={
+                "ok": True,
+                "filename": "work.pdf",
+                "task_url": "https://demo-school.managebac.cn/student/classes/1000001/core_tasks/1000021",
+            },
+        ),
+        patch.object(client, "get_class_tasks") as mock_grades,
+    ):
+        rc = cmd_submissions(args)
+
+    assert rc == 0
+    payload = mock_print.call_args[0][0]
+    assert payload["ok"] is True
+    assert payload["data"]["action"] == "add"
+
+    mock_grades.assert_not_called()
+    row = next(
+        t
+        for section in ("upcoming", "past", "overdue")
+        for t in load_snapshot(snapshot_path).get(section, [])
+        if t["id"] == "1000021"
+    )
+    assert row["status"] == "submitted"
+    assert row["has_submit_button"] is False
+
+
+@patch("tahuti.__main__._build_client")
+@patch("tahuti.__main__._authenticate_client")
 @patch("tahuti.__main__.print_payload")
 def test_cli_submissions_missing_target(mock_print, mock_auth, mock_build):
     mock_build.return_value = (MagicMock(active_profile="default"), _make_client(), "test@example.com")
