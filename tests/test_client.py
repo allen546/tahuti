@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import sys
@@ -554,21 +555,46 @@ class TestGetCalendarEvents:
             assert events == []
 
 
+CALENDAR_PAGE_URL = "https://myschool.managebac.cn/student/calendar"
+WEBCAL_ICS_URL = "https://managebac.com/student/events/token/abc123.ics"
+
+
+def _register_calendar_pair(m, page_html, ics="BEGIN:VCALENDAR"):
+    """Serve the calendar page and the iCal feed its webcal token names.
+
+    Every test of ``get_ical_feed`` needs both: the page is where the token is
+    scraped from, and the token's URL is what the feed is then fetched from.
+    *ics* is whatever ``requests_mock`` should answer the feed with — a body, or
+    a list of response dicts to rotate through across successive calls.
+    """
+    m.get(CALENDAR_PAGE_URL, text=page_html)
+    if isinstance(ics, list):
+        # A rotation of responses goes in positionally, and requests_mock
+        # refuses it alongside any response kwargs.
+        m.get(WEBCAL_ICS_URL, ics)
+    else:
+        m.get(WEBCAL_ICS_URL, text=ics)
+
+
+def _calendar_page_fetches(m):
+    """Only the requests that fetched the 171 KB page, never the feed itself."""
+    return [r for r in m.request_history if r.path == "/student/calendar"]
+
+
 class TestGetICalFeed:
     def test_fetches_ical(self, client, sample_calendar_page_html):
         with rm.Mocker() as m:
-            m.get(
-                "https://myschool.managebac.cn/student/calendar",
-                text=sample_calendar_page_html,
-            )
-            m.get(
-                "https://managebac.com/student/events/token/abc123.ics",
-                text="BEGIN:VCALENDAR\nEND:VCALENDAR",
+            _register_calendar_pair(
+                m,
+                sample_calendar_page_html,
+                ics="BEGIN:VCALENDAR\nEND:VCALENDAR",
             )
             ical = client.get_ical_feed()
             assert "VCALENDAR" in ical
 
     def test_no_webcal_link_raises(self, client):
+        # No `_register_calendar_pair`: this is the one case with no feed to
+        # serve, because the page must fail to yield a link at all.
         with rm.Mocker() as m:
             m.get(
                 "https://myschool.managebac.cn/student/calendar",
@@ -1237,12 +1263,30 @@ class TestConditionalRevalidation:
 
     URL = "https://myschool.managebac.cn/student/events.json?start=2026-04-29&end=2026-05-05"
 
-    def _prime(self, client, body="[]", etag='W/"aaa"'):
-        client.cache.put(self.URL, body, 200, etag)
-
     def _expire(self, client):
         """Age the entry past its TTL so the next read must revalidate."""
         client.cache.ttl = 0
+
+    @contextlib.contextmanager
+    def _a_stale_entry(self, client, body, etag=None):
+        """Prime the cache with *body*, age it past its TTL, then hand back a
+        mocker whose history starts empty.
+
+        Whatever the test registers next is therefore the only request it can
+        observe, which is what makes "the re-fetch was conditional" a statement
+        about `_get_revalidating` rather than about the priming call.  *etag* is
+        what the priming response answers with, and so what the stored entry
+        must offer as ``If-None-Match``.
+        """
+        with rm.Mocker() as m:
+            response = {"json": body}
+            if etag:
+                response["headers"] = {"ETag": etag}
+            m.get(self.URL, **response)
+            client.get_calendar_events("2026-04-29", "2026-05-05")
+            self._expire(client)
+            m.reset_mock()
+            yield m
 
     def test_a_fresh_entry_costs_no_request(self, client):
         with rm.Mocker() as m:
@@ -1254,22 +1298,14 @@ class TestConditionalRevalidation:
             assert m.call_count == 1
 
     def test_a_stale_entry_sends_if_none_match(self, client):
-        with rm.Mocker() as m:
-            m.get(self.URL, json=[], headers={"ETag": 'W/"aaa"'})
-            client.get_calendar_events("2026-04-29", "2026-05-05")
-            self._expire(client)
-            m.reset_mock()
+        with self._a_stale_entry(client, [], etag='W/"aaa"') as m:
             m.get(self.URL, json=[])
             client.get_calendar_events("2026-04-29", "2026-05-05")
             sent = m.request_history[-1].headers.get("If-None-Match")
             assert sent == 'W/"aaa"', sent
 
     def test_a_304_replays_the_stored_body(self, client):
-        with rm.Mocker() as m:
-            m.get(self.URL, json=[{"id": 7, "title": "Kept"}])
-            client.get_calendar_events("2026-04-29", "2026-05-05")
-            self._expire(client)
-            m.reset_mock()
+        with self._a_stale_entry(client, [{"id": 7, "title": "Kept"}]) as m:
             # 304 with a zero-byte body: the answer must come from the cache.
             m.get(self.URL, status_code=304, text="")
             events = client.get_calendar_events("2026-04-29", "2026-05-05")
@@ -1278,22 +1314,16 @@ class TestConditionalRevalidation:
 
     def test_a_304_stores_nothing_new(self, client):
         """A 304 must not overwrite the entry it just validated."""
-        with rm.Mocker() as m:
-            m.get(self.URL, json=[{"id": 7}])
-            client.get_calendar_events("2026-04-29", "2026-05-05")
+        with self._a_stale_entry(client, [{"id": 7}]) as m:
+            # `_expire` sets `ttl`; only `put` and `invalidate` write `ts`.  So
+            # this is still the priming call's timestamp, not a fresh one.
             before = client.cache.get_entry(self.URL)["ts"]
-            self._expire(client)
-            m.reset_mock()
             m.get(self.URL, status_code=304, text="")
             client.get_calendar_events("2026-04-29", "2026-05-05")
             assert client.cache.get_entry(self.URL)["ts"] == before
 
     def test_a_changed_body_replaces_the_entry_and_its_etag(self, client):
-        with rm.Mocker() as m:
-            m.get(self.URL, json=[{"id": 1}])
-            client.get_calendar_events("2026-04-29", "2026-05-05")
-            self._expire(client)
-            m.reset_mock()
+        with self._a_stale_entry(client, [{"id": 1}]) as m:
             m.get(self.URL, json=[{"id": 2}], headers={"ETag": 'W/"bbb"'})
             events = client.get_calendar_events("2026-04-29", "2026-05-05")
             assert [e["id"] for e in events] == [2]
@@ -1328,38 +1358,26 @@ class TestCachedWebcalToken:
     second one to keep in step with the first.
     """
 
-    TOKEN_KEY = "https://myschool.managebac.cn/student/calendar?__derived__=webcal_url"
+    # `_webcal_url` builds this key inline (client.py:1993) and exposes no
+    # constant for a test to import, so this literal is the only spelling
+    # available.  Deriving it from CALENDAR_PAGE_URL at least keeps the page
+    # half in step; the `__derived__` suffix is what a production key change
+    # would have to match here.
+    TOKEN_KEY = f"{CALENDAR_PAGE_URL}?__derived__=webcal_url"
 
     def test_the_page_is_fetched_once_per_ttl(self, client, sample_calendar_page_html):
         with rm.Mocker() as m:
-            m.get(
-                "https://myschool.managebac.cn/student/calendar",
-                text=sample_calendar_page_html,
-            )
-            m.get(
-                "https://managebac.com/student/events/token/abc123.ics",
-                text="BEGIN:VCALENDAR",
-            )
+            _register_calendar_pair(m, sample_calendar_page_html)
             client.get_ical_feed()
             assert m.call_count == 2  # page + ics
             client.get_ical_feed()
             # Neither is re-fetched: both the token and the feed are cached.
             assert m.call_count == 2
-            pages = [
-                r for r in m.request_history if r.path == "/student/calendar"
-            ]
-            assert len(pages) == 1
+            assert len(_calendar_page_fetches(m)) == 1
 
     def test_the_token_is_stored_under_a_key_naming_its_page(self, client, sample_calendar_page_html):
         with rm.Mocker() as m:
-            m.get(
-                "https://myschool.managebac.cn/student/calendar",
-                text=sample_calendar_page_html,
-            )
-            m.get(
-                "https://managebac.com/student/events/token/abc123.ics",
-                text="BEGIN:VCALENDAR",
-            )
+            _register_calendar_pair(m, sample_calendar_page_html)
             client.get_ical_feed()
             entry = client.cache.get_entry(self.TOKEN_KEY)
             assert entry is not None
@@ -1391,15 +1409,12 @@ class TestCachedWebcalToken:
         """The probe covered 901 s and could not rule out a longer cadence, so a
         stale token must cost one wasted request rather than a broken command."""
         with rm.Mocker() as m:
-            m.get(
-                "https://myschool.managebac.cn/student/calendar",
-                text=sample_calendar_page_html,
-            )
             # A sequence, not three registrations: the last registration would
             # win and the 404 would never be seen.
-            m.get(
-                "https://managebac.com/student/events/token/abc123.ics",
-                [
+            _register_calendar_pair(
+                m,
+                sample_calendar_page_html,
+                ics=[
                     {"text": "BEGIN:VCALENDAR", "status_code": 200},
                     {"text": "not found", "status_code": 404},
                     {"text": "BEGIN:VCALENDAR", "status_code": 200},
@@ -1414,22 +1429,12 @@ class TestCachedWebcalToken:
             out = client.get_ical_feed()
             assert "VCALENDAR" in out
             # The page was re-fetched to re-derive the token.
-            pages = [
-                r for r in m.request_history if r.path == "/student/calendar"
-            ]
-            assert len(pages) == 2
+            assert len(_calendar_page_fetches(m)) == 2
 
-    def test_logout_clears_the_token(self, client, sample_calendar_page_html, tmp_path):
+    def test_logout_clears_the_token(self, client, sample_calendar_page_html):
         """It is a credential-ish value, so it must not outlive the session."""
         with rm.Mocker() as m:
-            m.get(
-                "https://myschool.managebac.cn/student/calendar",
-                text=sample_calendar_page_html,
-            )
-            m.get(
-                "https://managebac.com/student/events/token/abc123.ics",
-                text="BEGIN:VCALENDAR",
-            )
+            _register_calendar_pair(m, sample_calendar_page_html)
             client.get_ical_feed()
             assert client.cache.get_entry(self.TOKEN_KEY) is not None
             client.cache.clear()
@@ -1439,29 +1444,20 @@ class TestCachedWebcalToken:
         """The whole point: sharing one TTL would expire them together and
         re-fetch all 171 KB to re-read a 36-character value."""
         with rm.Mocker() as m:
-            m.get(
-                "https://myschool.managebac.cn/student/calendar",
-                text=sample_calendar_page_html,
-            )
-            m.get(
-                "https://managebac.com/student/events/token/abc123.ics",
-                text="BEGIN:VCALENDAR",
-            )
+            _register_calendar_pair(m, sample_calendar_page_html)
             client.get_ical_feed()
             # Only the page/feed TTL lapses.
             client.cache.ttl = 0
             m.reset_mock()
             client.get_ical_feed()
-            pages = [
-                r for r in m.request_history if r.path == "/student/calendar"
-            ]
-            assert pages == [], "the 171 KB page was re-fetched for its token"
+            assert _calendar_page_fetches(m) == [], "the 171 KB page was re-fetched for its token"
             # The feed itself was revalidated, not re-downloaded.
             assert m.call_count == 1
 
     def test_a_disabled_cache_re_derives_the_token(self, client, sample_calendar_page_html):
         """`--refresh` turns the response cache off; the token must go with it.
 
+<<<<<<< HEAD
         The old mirror object carried its own `enabled`, copied across once in
         ``__init__``, so a cache replaced afterwards could leave a live token
         behind a disabled one.  One object cannot.
@@ -1482,3 +1478,31 @@ class TestCachedWebcalToken:
                 r for r in m.request_history if r.path == "/student/calendar"
             ]
             assert len(pages) == 2, "a disabled cache still served the token"
+=======
+    def test_a_disabled_cache_serves_no_token(self, tmp_path, sample_calendar_page_html):
+        """`--refresh` turns the response cache off; the token must go too.
+
+        This drives the production path rather than the attribute.
+        `build_client` hands `ManageBacClient` a `ResponseCache(enabled=False)`
+        (auth.py:273), and the token's cache is derived from that one in
+        `__init__` (client.py:573).  Assigning `client.cache.enabled = False`
+        *afterwards* would not reach it — the mirror is frozen at construction —
+        so the client is built the way `--refresh` builds it instead.
+
+        The assertion counts requests rather than inspecting a cache object, so
+        it holds under either implementation of the derived entry: a disabled
+        cache must serve nothing, and every `get_ical_feed` re-reads the page.
+        """
+        cache = ResponseCache(cache_dir=tmp_path / "cache", enabled=False)
+        client = ManageBacClient(
+            "myschool", domain="managebac.cn", cache=cache, verify=False, retry=0
+        )
+        client.set_cookie("test_session_cookie")
+        with rm.Mocker() as m:
+            _register_calendar_pair(m, sample_calendar_page_html)
+            assert "VCALENDAR" in client.get_ical_feed()
+            assert "VCALENDAR" in client.get_ical_feed()
+            assert len(_calendar_page_fetches(m)) == 2, (
+                "a disabled cache still served the token"
+            )
+>>>>>>> fix/test-hygiene
