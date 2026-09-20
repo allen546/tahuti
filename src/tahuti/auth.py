@@ -326,27 +326,47 @@ def build_client(
     return state, client, email_out
 
 
+# Statuses this health check knows how to read an answer from. Anything else is
+# a host that does not implement HEAD the way the probe measured, and gets a GET.
+_SESSION_ALIVE_STATUSES = frozenset((200, 401, 403, 301, 302, 303, 307, 308))
+
+
 def _is_session_alive(client: ManageBacClient) -> bool:
-    """Lightweight health check — GET a protected page, return True if session is valid.
+    """Lightweight health check — HEAD a protected page, return True if the session is valid.
 
     Checks both for login redirects (3xx → /login) and auth failures (401/403).
     Uses a page that requires authentication so an expired session reliably redirects.
+
+    HEAD rather than GET: this reads only a status code and a Location header,
+    yet a GET of /student/dashboard costs ~275 KB of decompressed body on every
+    invocation that reuses a saved cookie. HEAD returns the same status, the
+    same Content-Type, the same Cache-Control and a present Etag, for a
+    zero-byte body. An unexpected status falls back to GET rather than being
+    guessed at, so a host without HEAD support costs one extra request instead
+    of a wrong answer.
     """
-    try:
-        # Use allow_redirects=False so we can inspect the Location header directly.
-        # r.url always reflects the *request* URL, never the redirect target.
-        r = client.session.get(
-            f"{client.base}/student/dashboard", allow_redirects=False
-        )
+    url = f"{client.base}/student/dashboard"
+    # allow_redirects=False so the Location header can be inspected directly.
+    # r.url always reflects the *request* URL, never the redirect target.
+    # The two bound methods rather than session.request(method, ...), so a
+    # caller stubbing session.get keeps stubbing the fallback.
+    for method, call in (("HEAD", client.session.head), ("GET", client.session.get)):
+        try:
+            r = call(url, allow_redirects=False)
+        except Exception:
+            if method == "HEAD":
+                # A proxy that mishandles HEAD must not cost a re-login.
+                continue
+            return False
+        if r.status_code not in _SESSION_ALIVE_STATUSES and method == "HEAD":
+            continue
         if r.status_code in (401, 403):
             return False
         if r.status_code in (301, 302, 303, 307, 308):
-            location = r.headers.get("Location", "")
-            return "/login" not in location
+            return "/login" not in r.headers.get("Location", "")
         # 200 OK on an auth-required page means the session is valid
         return True
-    except Exception:
-        return False
+    return False
 
 
 def _relogin_from_creds(

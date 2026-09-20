@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import tahuti.cache as cache_mod
-from tahuti.cache import ResponseCache
+from tahuti.cache import DEFAULT_TTL, ResponseCache
 
 
 # ── Basic CRUD ────────────────────────────────────────────────────────────
@@ -933,3 +933,27 @@ def test_clear_leaves_the_directory_itself(tmp_path):
     c.put("https://x.managebac.cn/a", "v1", 200)
     c.clear()
     assert c.cache_dir.is_dir()
+
+
+class TestNoneTTL:
+    """A None TTL is a crash waiting for the first get(), not "cache forever"."""
+
+    def test_none_ttl_is_clamped_to_the_default(self, tmp_path):
+        c = ResponseCache(cache_dir=tmp_path, ttl=None)
+        assert c.ttl == DEFAULT_TTL
+
+    def test_none_ttl_does_not_raise_on_get(self, tmp_path):
+        """The regression: put() succeeded, then get() raised TypeError."""
+        c = ResponseCache(cache_dir=tmp_path, ttl=None)
+        c.put("https://x.managebac.cn/a", "v1", 200)
+        assert c.get("https://x.managebac.cn/a") == ("v1", 200)
+
+    def test_an_explicit_zero_ttl_still_expires_immediately(self, tmp_path):
+        """Clamping must not swallow a deliberate 0 — that is a real value."""
+        c = ResponseCache(cache_dir=tmp_path, ttl=0)
+        c.put("https://x.managebac.cn/a", "v1", 200)
+        assert c.get("https://x.managebac.cn/a") is None
+
+    def test_an_explicit_ttl_is_untouched(self, tmp_path):
+        c = ResponseCache(cache_dir=tmp_path, ttl=1234)
+        assert c.ttl == 1234

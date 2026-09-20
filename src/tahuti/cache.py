@@ -40,7 +40,11 @@ class ResponseCache:
         enabled: bool = True,
     ):
         self.cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
-        self.ttl = ttl
+        # A None TTL is not "cache forever", it is a TypeError waiting for the
+        # first get(), which compares `time.time() - ts` against it. config
+        # coerces it, but a caller constructing a ResponseCache directly
+        # bypasses that layer, so it is defended here too.
+        self.ttl = DEFAULT_TTL if ttl is None else ttl
         self.enabled = enabled
 
     def _key(self, url: str) -> str:

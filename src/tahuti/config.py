@@ -18,6 +18,12 @@ PERM_WARN_ENV = "MANAGEBAC_NO_PERM_WARN"
 PASSWORD_ENV = "MANAGEBAC_PASSWORD"
 COOKIE_ENV = "MANAGEBAC_COOKIE"
 
+# The response-cache TTL default, in seconds. Declared here rather than
+# imported from .cache, because .cache imports this module for config_dir() and
+# the reverse import would be circular. tests/test_config.py asserts the two
+# agree, so the duplication cannot drift unnoticed.
+DEFAULT_CACHE_TTL = 900
+
 # The pre-rename spellings. Kept as deprecated fallbacks for exactly the reason
 # the `mb` command alias survived the rename: a working setup must not break
 # because a variable changed its name. The new name wins when both are set, so
@@ -52,6 +58,20 @@ def env_value(new: str, legacy: str) -> str | None:
     return os.environ.get(new) or os.environ.get(legacy) or None
 
 
+def _coerce_cache_ttl(value: object) -> int:
+    """Return *value* as a usable cache TTL, substituting the default.
+
+    A config key that is present but null reaches `dict.get` as None rather
+    than as the default, and a None TTL is not "cache forever" — it is a
+    TypeError waiting for the first `get()`, which compares `time.time() - ts`
+    against it. Anything non-numeric is treated the same way, since a config
+    written by hand is not the place to be strict.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return DEFAULT_CACHE_TTL
+    return int(value)
+
+
 @dataclass
 class ProfileConfig:
     name: str
@@ -63,7 +83,7 @@ class ProfileConfig:
     default_subject: str = ""
     default_details: bool = False
     default_format: str = "pretty"
-    default_cache_ttl: int = 900
+    default_cache_ttl: int = DEFAULT_CACHE_TTL
 
 
 @dataclass
@@ -321,7 +341,14 @@ def load_state(
         default_subject=defaults.get("subject", ""),
         default_details=defaults.get("details", False),
         default_format=defaults.get("format", "pretty"),
-        default_cache_ttl=defaults.get("cache_ttl", 900),
+        # `dict.get(key, default)` returns the default only when the key is
+        # ABSENT. A key present with a null value — `"cache_ttl": null`, which
+        # a hand-edited or schema-defaulted config produces — returns None, and
+        # ResponseCache(ttl=None) then raises `TypeError: '>' not supported
+        # between instances of 'float' and 'NoneType'` on its first get(),
+        # after put() has already written the entry. Coerce here, at the one
+        # place the value enters the system.
+        default_cache_ttl=_coerce_cache_ttl(defaults.get("cache_ttl")),
     )
     session = SessionConfig(
         name=active_profile,

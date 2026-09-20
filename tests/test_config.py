@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 
+from tahuti.cache import DEFAULT_TTL
 from tahuti.config import (
+    DEFAULT_CACHE_TTL,
     AppState,
     ProfileConfig,
     SessionConfig,
@@ -269,3 +271,70 @@ def test_write_json_replaces_existing_content(tmp_path):
     import json
     assert json.loads(target.read_text()) == {"v": 2}
     assert target.stat().st_mode & 0o777 == 0o600
+
+
+class TestCacheTTLCoercion:
+    """A `cache_ttl` key present with a null value must not become None.
+
+    `dict.get(key, default)` returns the default only when the key is absent,
+    so `"cache_ttl": null` used to flow straight through as None and
+    ResponseCache(ttl=None) raised TypeError on its first get(), after put()
+    had already written the entry.
+    """
+
+    def _state_with(self, tmp_path, ttl_value):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "active_profile": "test",
+                    "profiles": {
+                        "test": {
+                            "school": "myschool",
+                            "domain": "managebac.cn",
+                            "defaults": {"cache_ttl": ttl_value},
+                        }
+                    },
+                }
+            )
+        )
+        return load_state("test", config_path=config_path)
+
+    def test_null_ttl_becomes_the_default(self, tmp_path):
+        state = self._state_with(tmp_path, None)
+        assert state.profile.default_cache_ttl == DEFAULT_CACHE_TTL
+
+    def test_missing_key_becomes_the_default(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "active_profile": "test",
+                    "profiles": {"test": {"school": "myschool"}},
+                }
+            )
+        )
+        state = load_state("test", config_path=config_path)
+        assert state.profile.default_cache_ttl == DEFAULT_CACHE_TTL
+
+    def test_a_real_value_survives(self, tmp_path):
+        state = self._state_with(tmp_path, 600)
+        assert state.profile.default_cache_ttl == 600
+
+    def test_a_garbage_value_falls_back_rather_than_crashing_later(
+        self, tmp_path
+    ):
+        state = self._state_with(tmp_path, "not-a-number")
+        assert state.profile.default_cache_ttl == DEFAULT_CACHE_TTL
+
+    def test_a_bool_is_not_treated_as_an_int(self, tmp_path):
+        """`True` is an int in Python, and a TTL of 1 second is never meant."""
+        state = self._state_with(tmp_path, True)
+        assert state.profile.default_cache_ttl == DEFAULT_CACHE_TTL
+
+    def test_the_two_defaults_agree(self):
+        """config cannot import .cache (that module imports config for
+        config_dir), so the constant is duplicated. Pin them together."""
+        from tahuti.cache import DEFAULT_TTL
+
+        assert DEFAULT_CACHE_TTL == DEFAULT_TTL

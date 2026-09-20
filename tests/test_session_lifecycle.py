@@ -28,11 +28,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from tahuti import auth, keychain
 from tahuti import client as client_module
 from tahuti import __main__ as main_module
-from tahuti.auth import build_client
+from tahuti.auth import _is_session_alive, build_client
 from tahuti.__main__ import build_parser, main
 from tahuti.config import (
     all_creds_paths,
@@ -932,3 +933,98 @@ class TestEnvPasswordIsNotPersisted:
         # And it went nowhere near disk.
         assert _no_creds_anywhere()
         assert json.loads(capsys.readouterr().out)["data"]["credentials_saved"] is False
+
+
+# ── 5. the health check must be cheap ────────────────────────────────────
+
+
+class TestHealthCheckUsesHEAD:
+    """`_is_session_alive` reads a status and a Location, not a body.
+
+    A GET of /student/dashboard costs ~275 KB of decompressed body on every
+    invocation that reuses a saved cookie. HEAD answers the same question for
+    zero bytes.
+    """
+
+    @staticmethod
+    def _client(method_status):
+        client = MagicMock()
+        client.base = "https://myschool.managebac.cn"
+        client.session.head.side_effect = lambda u, **kw: _resp(
+            method_status.get("HEAD"), kw
+        )
+        client.session.get.side_effect = lambda u, **kw: _resp(
+            method_status.get("GET"), kw
+        )
+        return client
+
+    def test_it_issues_head_not_get(self, state_dir):
+        client = self._client({"HEAD": 200})
+        assert _is_session_alive(client) is True
+        client.session.head.assert_called_once()
+        client.session.get.assert_not_called()
+
+    def test_head_is_not_redirected(self, state_dir):
+        """The Location header is the whole answer, so redirects must not be
+        followed — same contract the GET version had."""
+        client = self._client({"HEAD": 302})
+        client.session.head.side_effect = lambda u, **kw: _resp(
+            302, kw, location="https://myschool.managebac.cn/login"
+        )
+        assert _is_session_alive(client) is False
+
+    def test_head_302_not_to_login_counts_as_alive(self, state_dir):
+        client = self._client({})
+        client.session.head.side_effect = lambda u, **kw: _resp(
+            302, kw, location="https://myschool.managebac.cn/student"
+        )
+        assert _is_session_alive(client) is True
+
+    def test_head_401_means_dead(self, state_dir):
+        client = self._client({"HEAD": 401})
+        assert _is_session_alive(client) is False
+
+    def test_head_403_means_dead(self, state_dir):
+        client = self._client({"HEAD": 403})
+        assert _is_session_alive(client) is False
+
+    def test_an_unexpected_status_falls_back_to_get(self, state_dir):
+        """A host without HEAD answers 405. One extra request beats a guess."""
+        client = self._client({"HEAD": 405, "GET": 200})
+        assert _is_session_alive(client) is True
+        assert client.session.head.call_count == 1
+        assert client.session.get.call_count == 1
+
+    def test_a_head_transport_error_falls_back_to_get(self, state_dir):
+        """A proxy that mishandles HEAD must not cost a needless re-login."""
+        client = MagicMock()
+        client.base = "https://myschool.managebac.cn"
+
+        def flaky(url, **kw):
+            raise requests.ConnectionError("proxy said no")
+
+        client.session.head.side_effect = flaky
+        client.session.get.side_effect = lambda u, **kw: _resp(200, kw)
+        assert _is_session_alive(client) is True
+        assert client.session.head.call_count == 1
+        assert client.session.get.call_count == 1
+
+    def test_a_get_transport_error_is_still_false(self, state_dir):
+        client = MagicMock()
+        client.base = "https://myschool.managebac.cn"
+        client.session.head.side_effect = requests.ConnectionError("down")
+        client.session.get.side_effect = requests.ConnectionError("down")
+        assert _is_session_alive(client) is False
+
+
+def _resp(status, kwargs, location=None):
+    """A minimal stand-in for a requests.Response.
+
+    `_is_session_alive` reads only status_code and headers, so that is all this
+    needs to provide.
+    """
+    r = MagicMock()
+    r.status_code = status
+    r.headers = {"Location": location} if location else {}
+    assert kwargs.get("allow_redirects") is False
+    return r
