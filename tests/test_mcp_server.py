@@ -679,9 +679,7 @@ class TestGetClassGradesTool:
         mock_client.get_classes.assert_called_once()
         mock_client.crawl_all.assert_not_called()
 
-    def test_grades_by_name_resolves_a_class_with_no_tasks(
-        self, mock_build_client
-    ):
+    def test_grades_by_name_resolves_a_class_with_no_tasks(self, mock_build_client):
         mock, mock_client = mock_build_client
         mock_client.get_classes.return_value = {"300": "Physics"}
         mock_client.get_class_grades.return_value = {"tasks": [], "expected_grade": None}

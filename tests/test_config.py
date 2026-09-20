@@ -321,9 +321,7 @@ class TestCacheTTLCoercion:
         state = self._state_with(tmp_path, 600)
         assert state.profile.default_cache_ttl == 600
 
-    def test_a_garbage_value_falls_back_rather_than_crashing_later(
-        self, tmp_path
-    ):
+    def test_a_garbage_value_falls_back_rather_than_crashing_later(self, tmp_path):
         state = self._state_with(tmp_path, "not-a-number")
         assert state.profile.default_cache_ttl == DEFAULT_CACHE_TTL
 
@@ -335,6 +333,4 @@ class TestCacheTTLCoercion:
     def test_the_two_defaults_agree(self):
         """config cannot import .cache (that module imports config for
         config_dir), so the constant is duplicated. Pin them together."""
-        from tahuti.cache import DEFAULT_TTL
-
         assert DEFAULT_CACHE_TTL == DEFAULT_TTL
