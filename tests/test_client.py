@@ -1454,31 +1454,6 @@ class TestCachedWebcalToken:
             # The feed itself was revalidated, not re-downloaded.
             assert m.call_count == 1
 
-    def test_a_disabled_cache_re_derives_the_token(self, client, sample_calendar_page_html):
-        """`--refresh` turns the response cache off; the token must go with it.
-
-<<<<<<< HEAD
-        The old mirror object carried its own `enabled`, copied across once in
-        ``__init__``, so a cache replaced afterwards could leave a live token
-        behind a disabled one.  One object cannot.
-        """
-        with rm.Mocker() as m:
-            m.get(
-                "https://myschool.managebac.cn/student/calendar",
-                text=sample_calendar_page_html,
-            )
-            m.get(
-                "https://managebac.com/student/events/token/abc123.ics",
-                text="BEGIN:VCALENDAR",
-            )
-            client.get_ical_feed()
-            client.cache.enabled = False
-            client.get_ical_feed()
-            pages = [
-                r for r in m.request_history if r.path == "/student/calendar"
-            ]
-            assert len(pages) == 2, "a disabled cache still served the token"
-=======
     def test_a_disabled_cache_serves_no_token(self, tmp_path, sample_calendar_page_html):
         """`--refresh` turns the response cache off; the token must go too.
 
@@ -1505,4 +1480,3 @@ class TestCachedWebcalToken:
             assert len(_calendar_page_fetches(m)) == 2, (
                 "a disabled cache still served the token"
             )
->>>>>>> fix/test-hygiene
