@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 from .auth import build_client, hub_client
 from .client import parse_task_url
 from .config import own_state_refusal
-from .filters import InvalidViewError, normalize_view, result_views
+from .filters import InvalidViewError, normalize_view, result_views, summary_of
 from .notifications import MNNHubClient
 
 log = logging.getLogger(__name__)
@@ -313,12 +313,7 @@ def list_tasks(
         "upcoming": upcoming,
         "past": past,
         "overdue": overdue,
-        "summary": {
-            "upcoming_count": len(upcoming),
-            "past_count": len(past),
-            "overdue_count": len(overdue),
-            "total_count": len(upcoming) + len(past) + len(overdue),
-        },
+        "summary": summary_of({"upcoming": upcoming, "past": past, "overdue": overdue}),
     }
 
     return json.dumps(result, indent=2, ensure_ascii=False)
@@ -1061,8 +1056,8 @@ def get_class_grades(
         # Same roster `list_classes` reports and `crawl_all` discovers with.
         # Resolving a name from task links instead would contradict both: a
         # class `list_classes` lists would be "not found" here.
-        seen = client.get_classes()
-        for cid, cname in seen.items():
+        classes_map = client.get_classes()
+        for cid, cname in classes_map.items():
             if class_name.lower() in cname.lower():
                 class_id = cid
                 break
@@ -1070,16 +1065,16 @@ def get_class_grades(
             return json.dumps(
                 {
                     "error": f"No class matching '{class_name}'",
-                    "available": list(seen.values()),
+                    "available": list(classes_map.values()),
                 }
             )
 
     if not class_id:
         # Default to loading grades for all classes
-        seen = client.get_classes()
+        classes_map = client.get_classes()
 
         all_grades = {}
-        for cid, cname in seen.items():
+        for cid, cname in classes_map.items():
             try:
                 c_grades = client.get_class_grades(cid)
                 c_grades["class_name"] = cname

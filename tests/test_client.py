@@ -796,93 +796,75 @@ class TestGetCsrf:
 
 class TestCountGradeFrequencies:
     def test_counts_across_classes(self, client):
-        tasks_data = {
-            "upcoming": [
-                {
-                    "id": "1",
-                    "class_name": "Math",
-                    "link": "/student/classes/100/core_tasks/1",
-                },
-            ],
-            "past": [],
-            "overdue": [],
-        }
-        grades_data = {
-            "tasks": [
-                {"grade_letter": "A"},
-                {"grade_letter": "B"},
-                {"grade_letter": "A"},
-            ],
-            "categories": [],
-            "grade_scale": {},
-            "expected_grade": None,
-        }
-        with rm.Mocker() as m:
-            m.get(re.compile(r"view=upcoming"), json=[])
-            m.get(re.compile(r"view=past"), json=[])
-            m.get(re.compile(r"view=overdue"), json=[])
-            m.get(
-                "https://myschool.managebac.cn/student/tasks_and_deadlines?view=upcoming&page=1",
-                text="<html></html>",
-            )
-            m.get(
-                "https://myschool.managebac.cn/student/tasks_and_deadlines?view=past&page=1",
-                text="<html></html>",
-            )
-            m.get(
-                "https://myschool.managebac.cn/student/tasks_and_deadlines?view=overdue&page=1",
-                text="<html></html>",
-            )
-            # We need to mock crawl_all and get_class_grades
-            with patch.object(
+        # The roster comes from the dashboard scrape, not from task links: a
+        # class with no tasks has no link to parse and would be dropped.
+        with (
+            patch.object(
                 client,
-                "crawl_all",
+                "get_classes",
+                return_value={"100": "Math"},
+            ),
+            patch.object(
+                client,
+                "get_class_grades",
                 return_value={
-                    "upcoming": [
-                        {
-                            "id": "1",
-                            "class_name": "Math",
-                            "link": "/student/classes/100/core_tasks/1",
-                        }
+                    "tasks": [
+                        {"grade_letter": "A"},
+                        {"grade_letter": "B"},
+                        {"grade_letter": "A"},
                     ],
-                    "past": [],
-                    "overdue": [],
                 },
-            ):
-                with patch.object(
-                    client,
-                    "get_class_grades",
-                    return_value={
-                        "tasks": [
-                            {"grade_letter": "A"},
-                            {"grade_letter": "B"},
-                            {"grade_letter": "A"},
-                        ],
-                    },
-                ):
-                    result = client.count_grade_frequencies()
-                    assert result["grades"] == {"A": 2, "B": 1}
-                    assert result["total"] == 3
+            ),
+        ):
+            result = client.count_grade_frequencies()
+            assert result["grades"] == {"A": 2, "B": 1}
+            assert result["total"] == 3
+            assert result["classes"] == [{"id": "100", "name": "Math"}]
 
     def test_filter_no_match(self, client):
         with patch.object(
             client,
-            "crawl_all",
-            return_value={
-                "upcoming": [
-                    {
-                        "id": "1",
-                        "class_name": "Math",
-                        "link": "/student/classes/100/core_tasks/1",
-                    }
-                ],
-                "past": [],
-                "overdue": [],
-            },
+            "get_classes",
+            return_value={"100": "Math"},
         ):
             result = client.count_grade_frequencies(class_filter="Physics")
             assert "error" in result
             assert "Physics" in result["error"]
+            # The dashboard roster, not the filtered-to-empty one, is what a
+            # caller needs to pick a name that does exist.
+            assert result["available"] == ["Math"]
+
+    def test_includes_classes_with_no_tasks(self, client):
+        """An empty class is still a class.
+
+        This is the whole point of taking the roster from `get_classes`: the
+        task-link derivation had no link to parse for class 200 and so counted
+        it as not existing.
+        """
+        with (
+            patch.object(
+                client,
+                "get_classes",
+                return_value={"100": "Math", "200": "Empty Class"},
+            ),
+            patch.object(
+                client,
+                "get_class_grades",
+                side_effect=lambda cid: {
+                    "tasks": (
+                        [{"grade_letter": "A"}] if cid == "100" else []
+                    )
+                },
+            ),
+        ):
+            result = client.count_grade_frequencies()
+            assert result["classes"] == [
+                {"id": "100", "name": "Math"},
+                {"id": "200", "name": "Empty Class"},
+            ]
+            # It contributes no letters, but it is reported as counted.
+            assert result["grades"] == {"A": 1}
+            assert result["total"] == 1
 
 
 class TestRetryLogic:

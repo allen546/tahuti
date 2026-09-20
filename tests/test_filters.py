@@ -19,6 +19,7 @@ from tahuti.filters import (
     matches_subject,
     normalize_view,
     result_views,
+    summary_of,
 )
 
 
@@ -332,6 +333,67 @@ class TestResultViews:
         assert len(views["upcoming"]) == 0
         assert len(views["past"]) == 0
         assert len(views["overdue"]) == 1
+
+
+class TestSummaryOf:
+    """One producer for the summary shape, so the surfaces cannot drift.
+
+    The CLI's `list`, the MCP `list_tasks` tool and `filter_result_by_*` all
+    hand-built the same four keys, and `crawl_all` built a three-key one, so a
+    filtered result and a raw crawl carried different `summary` shapes.
+    """
+
+    def test_counts_each_view_and_the_total(self):
+        views = {
+            "upcoming": [{"t": 1}, {"t": 2}],
+            "past": [{"t": 3}],
+            "overdue": [],
+        }
+        assert summary_of(views) == {
+            "upcoming_count": 2,
+            "past_count": 1,
+            "overdue_count": 0,
+            "total_count": 3,
+        }
+
+    def test_ignores_keys_it_does_not_count(self):
+        # A full crawl result carries student_name, school, notifications and
+        # the rest; only the three view lists are counted.
+        result = {
+            "student_name": "X",
+            "upcoming": [{"t": 1}],
+            "past": [],
+            "overdue": [],
+            "notifications": {"unread_count": 4},
+        }
+        assert summary_of(result) == {
+            "upcoming_count": 1,
+            "past_count": 0,
+            "overdue_count": 0,
+            "total_count": 1,
+        }
+
+    def test_all_empty(self):
+        views = {"upcoming": [], "past": [], "overdue": []}
+        assert summary_of(views) == {
+            "upcoming_count": 0,
+            "past_count": 0,
+            "overdue_count": 0,
+            "total_count": 0,
+        }
+
+    def test_filter_result_by_subject_keeps_the_same_shape(self, make_crawl_result):
+        result = make_crawl_result(
+            upcoming=[
+                {"t": 1, "class_name": "Math"},
+                {"t": 2, "class_name": "Physics"},
+            ]
+        )
+        filtered = filter_result_by_subject(result, "Math")
+        # A filtered result and an unfiltered one must not carry different
+        # `summary` shapes — that is what the shared helper buys.
+        assert set(filtered["summary"]) == set(summary_of(filtered))
+        assert filtered["summary"]["total_count"] == 1
 
 
 class TestFindTaskById:

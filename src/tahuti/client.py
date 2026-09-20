@@ -2384,29 +2384,30 @@ class ManageBacClient:
 
         Returns ``{"grades": {"A": 5, "B": 3, ...}, "total": N, "classes": [...]}``.
         """
-        result = self.crawl_all(max_pages=5, fetch_details=False)
-        seen: dict[str, str] = {}
-        for task in result["upcoming"] + result["past"] + result["overdue"]:
-            link = task.get("link", "")
-            m = re.search(r"/student/classes/(\d+)/", link)
-            cname = task.get("class_name", "")
-            if m and cname:
-                seen[m.group(1)] = cname
+        # The roster `crawl_all` itself discovers classes with: the dashboard
+        # scrape. Deriving it from task links instead — which this did, and
+        # which the MCP `list_classes` tool no longer does — silently drops
+        # every class with no tasks, because an empty class contributes no link
+        # to parse, so two MCP tools answered "which classes exist"
+        # differently. It also cost a full crawl (dashboard, every class page
+        # and the notification hub) to answer a question the dashboard already
+        # answers.
+        classes_map = self.get_classes()
 
         target_classes: list[tuple[str, str]]
         if class_filter:
             target_classes = [
                 (cid, cn)
-                for cid, cn in seen.items()
+                for cid, cn in classes_map.items()
                 if class_filter.lower() in cn.lower()
             ]
             if not target_classes:
                 return {
                     "error": f"No class matching '{class_filter}'",
-                    "available": list(seen.values()),
+                    "available": list(classes_map.values()),
                 }
         else:
-            target_classes = list(seen.items())
+            target_classes = list(classes_map.items())
 
         freq: dict[str, int] = {}
         classes_used: list[dict] = []

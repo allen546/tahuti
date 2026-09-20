@@ -179,16 +179,26 @@ def matches_grade_query(task: dict, query: str) -> bool:
     return grade_val == q
 
 
+def summary_of(views: dict) -> dict:
+    """Build the per-view task count summary from a view mapping.
+
+    ``views`` needs ``"upcoming"``, ``"past"`` and ``"overdue"`` lists; anything
+    else in it is ignored, so a full crawl result works as well as the three
+    slices ``result_views`` returns.
+    """
+    return {
+        "upcoming_count": len(views["upcoming"]),
+        "past_count": len(views["past"]),
+        "overdue_count": len(views["overdue"]),
+        "total_count": len(views["upcoming"])
+        + len(views["past"])
+        + len(views["overdue"]),
+    }
+
+
 def _update_summary_counts(result: dict) -> None:
     """Recalculate summary counts in-place for a result dict."""
-    result["summary"] = {
-        "upcoming_count": len(result["upcoming"]),
-        "past_count": len(result["past"]),
-        "overdue_count": len(result["overdue"]),
-        "total_count": len(result["upcoming"])
-        + len(result["past"])
-        + len(result["overdue"]),
-    }
+    result["summary"] = summary_of(result)
 
 
 def matches_tag(task: dict, tag_query: str) -> bool:

@@ -288,15 +288,7 @@ def test_grades_all_classes_when_every_class_failed_exits_nonzero(isolated_confi
     indistinguishable from an account that legitimately has no grades yet.
     """
     client = MagicMock()
-    client.crawl_all.return_value = {
-        "upcoming": [{"class_name": "Math", "link": "/student/classes/100/c/1"}],
-        "past": [],
-        "overdue": [],
-        "student_name": "X",
-        "school": "s",
-        "base_url": "u",
-        "crawled_at": "t",
-    }
+    client.get_classes.return_value = {"100": "Math"}
     client.get_class_grades.side_effect = RuntimeError("session expired")
 
     with (
@@ -314,21 +306,77 @@ def test_grades_all_classes_when_every_class_failed_exits_nonzero(isolated_confi
     assert payload["data"]["failed_classes"] == {"100": "session expired"}
 
 
+def test_grades_all_classes_includes_a_class_with_no_tasks(isolated_config):
+    """A class with no tasks is still a class.
+
+    `grades` rebuilt its roster by parsing class links out of `crawl_all`'s
+    tasks, so an empty class contributed no link and was absent from the
+    all-classes run — the same class `list_classes` reported. The roster now
+    comes from `client.get_classes()`, the dashboard scrape `crawl_all` itself
+    discovers classes with.
+    """
+    client = MagicMock()
+    client.get_classes.return_value = {"100": "Math", "200": "Empty Class"}
+    client.get_class_grades.return_value = {
+        "tasks": [],
+        "categories": [],
+        "grade_scale": {},
+    }
+
+    with (
+        patch("tahuti.__main__._build_client", return_value=(_state(), client, "a@b.com")),
+        patch("tahuti.auth.save_profile"),
+        patch("tahuti.auth.save_session"),
+    ):
+        code, payloads = _run_main(["grades", "--format", "json"])
+
+    assert code == EXIT_OK
+    assert sorted(payloads[-1]["data"]["classes_grades"]) == ["100", "200"]
+
+
+def test_grades_subject_matches_a_class_with_no_tasks(isolated_config):
+    """`--subject` resolves against the same roster, not just the busy classes.
+
+    The task-link roster made `--subject` fail with `class_not_found` for a
+    class that exists on the dashboard but has nothing in it yet.
+    """
+    client = MagicMock()
+    client.get_classes.return_value = {"100": "Math", "200": "Empty Class"}
+    client.get_class_grades.return_value = {"tasks": [], "grade_scale": {}}
+
+    with (
+        patch("tahuti.__main__._build_client", return_value=(_state(), client, "a@b.com")),
+        patch("tahuti.auth.save_profile"),
+        patch("tahuti.auth.save_session"),
+    ):
+        code, payloads = _run_main(
+            ["grades", "--subject", "Empty", "--format", "json"]
+        )
+
+    assert code == EXIT_OK
+    client.get_class_grades.assert_called_once_with("200")
+
+
+def test_grades_no_classes_exits_nonzero(isolated_config):
+    """An empty dashboard is a failure, not an empty all-classes run."""
+    client = MagicMock()
+    client.get_classes.return_value = {}
+
+    with (
+        patch("tahuti.__main__._build_client", return_value=(_state(), client, "a@b.com")),
+        patch("tahuti.auth.save_profile"),
+        patch("tahuti.auth.save_session"),
+    ):
+        code, payloads = _run_main(["grades", "--format", "json"])
+
+    assert code == EXIT_FAILURE
+    assert payloads[-1]["error"]["code"] == "no_classes"
+
+
 def test_grades_all_classes_partial_failure_exits_zero(isolated_config):
     """One class failing out of several is still a usable run."""
     client = MagicMock()
-    client.crawl_all.return_value = {
-        "upcoming": [
-            {"class_name": "Math", "link": "/student/classes/100/c/1"},
-            {"class_name": "Physics", "link": "/student/classes/200/c/2"},
-        ],
-        "past": [],
-        "overdue": [],
-        "student_name": "X",
-        "school": "s",
-        "base_url": "u",
-        "crawled_at": "t",
-    }
+    client.get_classes.return_value = {"100": "Math", "200": "Physics"}
 
     def _grades(cid):
         if cid == "100":

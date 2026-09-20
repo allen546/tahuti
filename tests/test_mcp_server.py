@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tahuti.client import ManageBacClient
+from tahuti.filters import summary_of
 from tahuti.mcp_server import (
     _error_payload,
     _sanitize_error,
@@ -133,6 +134,25 @@ class TestListTasksTool:
             assert len(data[name]) == (1 if name in reported_views else 0)
         assert data["summary"]["total_count"] == len(reported_views)
         assert "error" not in data
+
+    def test_summary_shape_matches_the_shared_helper(self, mock_build_client):
+        """The tool's summary comes from `filters.summary_of`, not a fourth copy.
+
+        `crawl_all` emits only three of the four keys, so a tool that hand-built
+        its own could report a different shape than the CLI's `list` for the
+        same student.
+        """
+        mock, mock_client = mock_build_client
+        mock_client.crawl_all.return_value = self._crawl(
+            upcoming=[{"id": "1", "title": "u", "class_name": "Math"}],
+            past=[{"id": "2", "title": "p", "class_name": "Math"}],
+            overdue=[{"id": "3", "title": "o", "class_name": "Math"}],
+        )
+        data = json.loads(list_tasks())
+        assert data["summary"] == summary_of(
+            {"upcoming": data["upcoming"], "past": data["past"], "overdue": data["overdue"]}
+        )
+        assert data["summary"]["total_count"] == 3
 
     @pytest.mark.parametrize("view", ["al", "upcomingg", "todo", "homework", "1"])
     def test_unrecognised_view_is_an_error_not_an_empty_list(
@@ -768,6 +788,35 @@ class TestCountGradeFrequenciesTool:
         result = count_grade_frequencies(class_name="Math")
         data = json.loads(result)
         mock_client.count_grade_frequencies.assert_called_once_with(class_filter="Math")
+
+    def test_agrees_with_list_classes_about_which_classes_exist(
+        self, mock_build_client
+    ):
+        """Two MCP tools, one answer to "which classes exist".
+
+        `count_grade_frequencies` rebuilt its roster by parsing class links out
+        of `crawl_all`'s tasks, so an empty class contributed no link and was
+        silently dropped here — while `list_classes`, fixed to use the dashboard
+        scrape, reported it. The real client method is bound onto the mock so
+        the tool's own roster is what gets exercised.
+        """
+        mock, mock_client = mock_build_client
+        mock_client.count_grade_frequencies = (
+            ManageBacClient.count_grade_frequencies.__get__(mock_client)
+        )
+        mock_client.get_classes.return_value = {"100": "Math", "200": "Physics (empty)"}
+        mock_client.get_class_grades.side_effect = lambda cid: {
+            "tasks": [{"grade_letter": "A"}] if cid == "100" else []
+        }
+
+        data = json.loads(count_grade_frequencies())
+        listed = {c["id"] for c in json.loads(list_classes())["classes"]}
+        counted = {c["id"] for c in data["classes"]}
+
+        assert counted == {"100", "200"} == listed
+        # The empty class contributes no letters, but it is not erased.
+        assert data["grades"] == {"A": 1}
+        mock_client.crawl_all.assert_not_called()
 
 
 class TestErrorSanitisation:

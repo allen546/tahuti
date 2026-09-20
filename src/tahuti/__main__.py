@@ -90,6 +90,7 @@ from .filters import (
     find_task_by_id,
     matches_subject,
     result_views,
+    summary_of,
 )
 from .formatters import error, ok, print_payload
 
@@ -697,14 +698,7 @@ def cmd_list(args) -> int:
         )
 
     views = result_views(result, view)
-    summary = {
-        "upcoming_count": len(views["upcoming"]),
-        "past_count": len(views["past"]),
-        "overdue_count": len(views["overdue"]),
-        "total_count": len(views["upcoming"])
-        + len(views["past"])
-        + len(views["overdue"]),
-    }
+    summary = summary_of(views)
     payload = ok(
         "list",
         state.active_profile,
@@ -1690,20 +1684,21 @@ def cmd_grades(args) -> int:
 
     class_id = args.class_id
     if not class_id:
-        result = client.crawl_all(max_pages=5, fetch_details=False)
-        seen: dict[str, str] = {}
-        for task in result["upcoming"] + result["past"] + result["overdue"]:
-            link = task.get("link", "")
-            m = re.search(r"/student/classes/(\d+)/", link)
-            cname = task.get("class_name", "")
-            if m and cname:
-                seen[m.group(1)] = cname
-        if not seen:
+        # The roster `crawl_all` itself discovers classes with: the dashboard
+        # scrape. Deriving it from task links instead — which this did, and
+        # which the MCP `list_classes` tool no longer does — silently drops
+        # every class with no tasks, because an empty class contributes no link
+        # to parse, so the two surfaces answered "which classes exist"
+        # differently. It also cost a full crawl (dashboard, every class page
+        # and the notification hub) to answer a question the dashboard already
+        # answers.
+        classes_map = client.get_classes()
+        if not classes_map:
             payload = error("grades", "no_classes", "No classes found")
             print_payload(payload, args.output, args.format)
             return 1
         if args.subject:
-            for cid, cname in seen.items():
+            for cid, cname in classes_map.items():
                 if args.subject.lower() in cname.lower():
                     class_id = cid
                     break
@@ -1719,7 +1714,7 @@ def cmd_grades(args) -> int:
             # Gather grades for ALL classes
             all_grades = {}
             failed: dict[str, str] = {}
-            for cid, cname in seen.items():
+            for cid, cname in classes_map.items():
                 try:
                     c_grades = client.get_class_grades(cid)
                     c_grades["class_name"] = cname
