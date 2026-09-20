@@ -90,9 +90,10 @@ The complete nonce inventory, in the order the probe's transform applies it:
 | e | `custom-pattern-<uuid>` SVG pattern ids in the gradebook chart JSON | 8–14 random UUIDs per render |
 | f | `?X-Amz-…` query on pre-signed S3 avatar `background-image` URLs | **a fresh AWS V4 signature** |
 
-Class (f) was found last and matters most: **without it, `core_tasks` is
-unstable** — the very page the rest of this analysis rests on. See the next
-section.
+Class (f) was found last and is the one this whole design turns on: the probe
+carries a `WITHOUT_F` recipe — every transform except (f) — precisely to measure
+whether `core_tasks` is stable without it. See the next section, which also
+records why that measurement is not yet in hand.
 
 > **Class (f) is a credential leak in its own right.** The pre-signed URL
 > embeds a live AWS STS session token in the page HTML. It was exposed in
@@ -118,16 +119,38 @@ normalization:**
 | `tasks_and_deadlines?view=upcoming` | 234,950 × 3 | **1** |
 | `tasks_and_deadlines?view=past` | 193,630 / 193,631 / 193,631 | **1** |
 
-**Class (f) is not optional.** The five-class recipe leaves `core_tasks`
-unstable with three distinct hashes; adding it collapses them to one. Anyone
-implementing from a shorter list gets a hash that drifts and blames the server.
+**Class (f) is not optional — but this is the one claim in this file that the
+shipped probe does not evidence, so read it as inference rather than
+measurement.**
+
+The probe measures it directly: it re-hashes the same three bodies per page
+under `WITHOUT_F` — every transform except (f) — and prints `STABLE` or
+`UNSTABLE` with a distinct-hash count. That comparison has not been re-run
+since `WITHOUT_F` was corrected, so no number for it is recorded here.
+
+What the recipe used to be is the reason. `WITHOUT_F` was `TRANSFORMS[:5]`, and
+`TRANSFORMS` holds nine entries across six lettered classes, so `[:5]` selects
+`a1`–`a4` and class (b): two of the six, not five. The probe labelled its own
+output "the original FIVE classes only", so the "three distinct hashes" this
+file carried describes a two-class recipe. That recipe cannot answer the
+question, and not as a matter of degree: adding a transform can only *increase*
+stability, so instability under two classes implies nothing about five.
+Classes (c), (d) and (e) all rotate on `core_tasks` — see the offset bands
+below — so a recipe leaving all three unnormalized is unstable whether or not
+(f) matters at all.
+
+The measurement that isolates (f) is the corrected one — classes (a)–(e)
+stable, classes (a)–(e) plus (f) unstable — and it is one re-run away. Until it
+is taken, the general warning stands on reasoning rather than data: omitting a
+class whose span rotates per render leaves a varying byte inside the hash, and
+which classes rotate on which pages is in the offset-band table below.
 
 **Sensitivity — it still discriminates.** Two different classes hash
 differently; two different views hash differently; the same URL three times
 hashes identically. And the stripping is not destroying content: on one page,
-task-card links 9→9, grade letters 11→11, chart assignment names 14→14, and
-both stripped meta tags survive with their values replaced and their markup
-intact.
+task-card links 9→9, grade letters 11→11, and both stripped meta tags survive
+with their values replaced and their markup intact. The probe's over-strip
+check covers exactly those four counts, and nothing wider.
 
 **What it cannot detect, by construction:** any change confined to a nonce
 class (a)–(f). Confirmed invisible on four negative controls — `applicationTime`
@@ -281,3 +304,12 @@ Read-only, takes the session cookie only, asserts `MB_CRAWLER_CREDS_PATH` is
 set so it cannot reach real credentials, paces every request at >= 1s, and
 writes its evidence to a directory you name with `--out` — deliberately outside
 the repo, because that directory contains a live AWS credential and a hub JWT.
+
+So that the table above can be audited against what actually runs: the stability
+table and the over-strip counts are probe output, and so is the *shape* of the
+`WITHOUT_F` comparison — one `STABLE`/`UNSTABLE` verdict and a distinct-hash
+count per page for the recipe with (f) dropped. What this file does not hold is
+that comparison's *numbers*, because the recipe was wrong when the document was
+written and has not been re-run since. The auth table was probed separately, as
+its own section says, and the character-level offset bands are offline diffing
+of the saved bodies — neither is produced by this script.

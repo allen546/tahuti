@@ -17,7 +17,8 @@ against the live account: every request is a GET, paced at >= 1s.
 
 Usage:
     cd <repo root>
-    MB_CRAWLER_CREDS_PATH=/nonexistent .venv/bin/python extras/probe_revalidation.py --out /tmp/probe-evidence
+    MB_CRAWLER_CREDS_PATH=/nonexistent \
+        .venv/bin/python extras/probe_revalidation.py --out /tmp/probe-evidence
 
 The evidence directory holds full grade pages and, critically, a live AWS STS
 session token and a ManageBac hub JWT scraped out of the raw HTML.  Treat it as
@@ -32,7 +33,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import sys
 import tempfile
 import time
@@ -87,14 +87,27 @@ TRANSFORMS = [
     # (f) NEW — pre-signed AWS S3 V4 URLs on inline avatar background-images.
     #     ManageBac mints a fresh signature (Credential, Date, Expires,
     #     Security-Token) per render, so the whole query string rotates.
-    #     Without this class, core_tasks is UNSTABLE.  See the findings doc.
+    #     This is the class WITHOUT_F drops; the comparison in q2_q3_hash is
+    #     what measures whether core_tasks is stable without it.
     ("f S3 signed-query",
      re.compile(r"\?X-Amz-[^)\"']*"), "?X-Amz-NR"),
 ]
 
-# The five classes (a)-(e) alone, for the before/after comparison that shows
-# why (f) is not optional.
-WITHOUT_F = TRANSFORMS[:5]
+# The five lettered classes (a)-(e) — eight transforms, everything but (f) —
+# for the before/after comparison that shows why (f) is not optional.  Sliced
+# from the end rather than written [:8] so that appending a class keeps this
+# meaning "all but (f)" instead of silently growing the recipe.
+#
+# It shipped once as TRANSFORMS[:5], under a comment claiming "the five
+# classes (a)-(e)".  TRANSFORMS holds nine entries across six lettered
+# classes, so [:5] selects a1-a4 and class (b): two of the six, not five.
+WITHOUT_F = TRANSFORMS[:-1]
+
+# The recipe is defined by exclusion, so it means "(a)-(e)" only while (f) is
+# still the last transform.  Fail loudly rather than let an appended class
+# quietly turn this into "all but (g)".
+assert TRANSFORMS[-1][0].startswith("f "), (
+    "WITHOUT_F drops the last transform; that must stay class (f)")
 
 
 def normalize(text: str, transforms=TRANSFORMS) -> str:
@@ -228,13 +241,14 @@ def q1_calendar(p: Probe) -> None:
 
 def q2_q3_hash(p: Probe, class_ids: list[str]) -> dict[str, list[str]]:
     head("Q2 - normalized-hash stability (3 fetches per page)")
+    base = p.client.base
     targets = {
-        "coreA": f"{p.client.base}/student/classes/{class_ids[0]}/core_tasks",
-        "tad_upcoming": f"{p.client.base}/student/tasks_and_deadlines?view=upcoming&page=1",
+        "coreA": f"{base}/student/classes/{class_ids[0]}/core_tasks",
+        "tad_upcoming": f"{base}/student/tasks_and_deadlines?view=upcoming&page=1",
     }
     if len(class_ids) > 1:
-        targets["coreB"] = f"{p.client.base}/student/classes/{class_ids[1]}/core_tasks"
-    targets["tad_past"] = f"{p.client.base}/student/tasks_and_deadlines?view=past&page=1"
+        targets["coreB"] = f"{base}/student/classes/{class_ids[1]}/core_tasks"
+    targets["tad_past"] = f"{base}/student/tasks_and_deadlines?view=past&page=1"
 
     bodies: dict[str, list[str]] = {}
     for name, url in targets.items():
@@ -260,9 +274,10 @@ def q2_q3_hash(p: Probe, class_ids: list[str]) -> dict[str, list[str]]:
         for h in hashes[g]:
             print(f"      sha256={h}")
 
-    # The comparison that matters: the five-class recipe leaves core_tasks
-    # unstable.  Show it rather than asserting it.
-    print("\n  same bodies, the original FIVE classes only (no S3 signed-query):")
+    # The comparison that matters: is class (f) optional?  Show it rather than
+    # asserting it.  The label names the recipe so a transcription of this
+    # output cannot repeat the "five classes" mislabel again.
+    print("\n  same bodies, classes (a)-(e) only - class (f) dropped:")
     for g, group in bodies.items():
         hs = [normhash(b, WITHOUT_F) for b in group]
         verdict = "STABLE" if len(set(hs)) == 1 else "UNSTABLE"
@@ -319,7 +334,9 @@ def q2_q3_hash(p: Probe, class_ids: list[str]) -> dict[str, list[str]]:
     for label, rx in [
         ("task card links", re.compile(r'/student/classes/\d+/core_tasks/\d+')),
         ("grade letters", re.compile(r'>\s*([A-F]|N/A)\s*<')),
-        ("autologout meta tag survives", re.compile(r"<meta content='NR' name='autologout'")),
+        ("autologout meta tag survives",
+         re.compile(r"<meta content='NR' "
+                    r"name='autologout'")),
         ("csrf meta tag survives", re.compile(r'<meta name="csrf-token" content="NR"')),
     ]:
         print(f"    {label:<32} raw={len(rx.findall(demo)):>4}  "
@@ -333,25 +350,28 @@ def q2_q3_hash(p: Probe, class_ids: list[str]) -> dict[str, list[str]]:
 def q4_dropbox(p: Probe, bodies: dict[str, list[str]]) -> None:
     head("Q4 - dropbox content negotiation")
     tid = None
-    for mm in re.finditer(r'/student/classes/\d+/core_tasks/(\d+)/dropbox',
-                          bodies["coreA"][0]):
+    mm = next(re.finditer(r'/student/classes/\d+/core_tasks/(\d+)/dropbox',
+                          bodies["coreA"][0]), None)
+    if mm is not None:
         tid = mm.group(1)
-        break
     if tid is None:
         # No task on this account has a dropbox.  Fall back to the first task
         # id so the request is still made, and say so.
         print("  note: no /dropbox link found in any core_tasks page for this")
         print("        account; falling back to a bare task id")
-        for mm in re.finditer(r'/student/classes/\d+/core_tasks/(\d+)',
-                              bodies["coreA"][0]):
+        mm = next(re.finditer(r'/student/classes/\d+/core_tasks/(\d+)',
+                              bodies["coreA"][0]), None)
+        if mm is not None:
             tid = mm.group(1)
-            break
     if not tid:
         print("  !! no task id found at all - skipping Q4")
         return
 
-    class_id = re.search(r'/student/classes/(\d+)/core_tasks',
-                         bodies["coreA"][0]).group(1)
+    cm = re.search(r'/student/classes/(\d+)/core_tasks', bodies["coreA"][0])
+    if cm is None:
+        print("  !! no class id on the core_tasks page - skipping Q4")
+        return
+    class_id = cm.group(1)
     dbx = f"{p.client.base}/student/classes/{class_id}/core_tasks/{tid}/dropbox"
     print(f"  target: class={class_id} task={tid}")
 
