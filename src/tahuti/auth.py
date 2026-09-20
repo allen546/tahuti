@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 
 from .cache import ResponseCache
-from .client import ManageBacClient
+from .client import ManageBacClient, _REDIRECT_STATUSES
 from . import keychain
 from .config import (
     AppState,
@@ -327,21 +327,30 @@ def build_client(
 
 
 # Statuses this health check knows how to read an answer from. Anything else is
-# a host that does not implement HEAD the way the probe measured, and gets a GET.
-_SESSION_ALIVE_STATUSES = frozenset((200, 401, 403, 301, 302, 303, 307, 308))
+# a host that does not implement HEAD, and gets a GET. Derived from the
+# client's own redirect set rather than restating it: those five 3xx codes
+# appeared here *and* a third time as a bare tuple in the verdict below, and no
+# test referenced any of the three spellings by name, so a status added to one
+# and not the others would have moved the behaviour with nothing noticing.
+_SESSION_ALIVE_STATUSES = _REDIRECT_STATUSES | {200, 401, 403}
 
 
 def _is_session_alive(client: ManageBacClient) -> bool:
-    """Lightweight health check — HEAD a protected page, return True if the session is valid.
+    """Lightweight health check — HEAD a protected page, return True if the
+    session is valid.
 
     Checks both for login redirects (3xx → /login) and auth failures (401/403).
-    Uses a page that requires authentication so an expired session reliably redirects.
+    Uses a page that requires authentication so an expired session reliably
+    redirects.
 
-    HEAD rather than GET: this reads only a status code and a Location header,
-    yet a GET of /student/dashboard costs ~275 KB of decompressed body on every
-    invocation that reuses a saved cookie. HEAD returns the same status, the
-    same Content-Type, the same Cache-Control and a present Etag, for a
-    zero-byte body. An unexpected status falls back to GET rather than being
+    HEAD rather than GET because this reads only a status code and a Location
+    header, and the GET it would otherwise make is the expensive one:
+    ``docs/http-revalidation-findings.md`` measures ``/student/dashboard`` at
+    200 with 275,003 B of body for a live credential and 401 with 26 B for a
+    dead one. Those are the *GET's* numbers. HEAD is expected to answer with
+    the same status and no body, but that was checked in an ad-hoc script that
+    was never committed, so it is a design expectation here and not a
+    measured claim. An unexpected status falls back to GET rather than being
     guessed at, so a host without HEAD support costs one extra request instead
     of a wrong answer.
     """
@@ -350,23 +359,39 @@ def _is_session_alive(client: ManageBacClient) -> bool:
     # r.url always reflects the *request* URL, never the redirect target.
     # The two bound methods rather than session.request(method, ...), so a
     # caller stubbing session.get keeps stubbing the fallback.
-    for method, call in (("HEAD", client.session.head), ("GET", client.session.get)):
+    #
+    # Two attempts, not a variable number of them. This was
+    # `for method, call in (("HEAD", ...), ("GET", ...))`, and every branch
+    # below meant something different depending on which iteration it ran in:
+    # `continue` meant "try the GET" in one arm and "give up" in the other, and
+    # only `method == "HEAD"` kept the two apart. Unrolled, HEAD is the attempt
+    # allowed to come back with nothing — either the transport refused it, or
+    # the host answered a status this cannot read — and the answer itself is
+    # read once, by whichever attempt produced it.
+    r = None
+    try:
+        r = client.session.head(url, allow_redirects=False)
+    except Exception:
+        # A proxy that mishandles HEAD must not cost a re-login.
+        r = None
+    if r is not None and r.status_code not in _SESSION_ALIVE_STATUSES:
+        # A host that does not implement HEAD answers 405. That says nothing
+        # about the session, so it earns a GET rather than a guess.
+        r = None
+    if r is None:
         try:
-            r = call(url, allow_redirects=False)
+            r = client.session.get(url, allow_redirects=False)
         except Exception:
-            if method == "HEAD":
-                # A proxy that mishandles HEAD must not cost a re-login.
-                continue
+            # Nothing left to try, and no answer: report the session dead.
             return False
-        if r.status_code not in _SESSION_ALIVE_STATUSES and method == "HEAD":
-            continue
-        if r.status_code in (401, 403):
-            return False
-        if r.status_code in (301, 302, 303, 307, 308):
-            return "/login" not in r.headers.get("Location", "")
-        # 200 OK on an auth-required page means the session is valid
-        return True
-    return False
+    if r.status_code in (401, 403):
+        return False
+    if r.status_code in _REDIRECT_STATUSES:
+        return "/login" not in r.headers.get("Location", "")
+    # 200 OK on an auth-required page means the session is valid. An
+    # unreadable *GET* status lands here too — the loop did the same, because
+    # only the HEAD arm carried the `continue` — and "dead" would be a guess.
+    return True
 
 
 def _relogin_from_creds(

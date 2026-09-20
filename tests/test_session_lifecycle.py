@@ -1016,6 +1016,92 @@ class TestHealthCheckUsesHEAD:
         client.session.get.side_effect = requests.ConnectionError("down")
         assert _is_session_alive(client) is False
 
+    def test_an_unreadable_get_status_is_still_alive(self, state_dir):
+        """Pinned, not endorsed: an unreadable *GET* status counts as alive.
+
+        Only the HEAD arm ever fell back, so a GET answering 405 reached the
+        trailing `return True`. That is the verdict the loop gave and the
+        unrolled version keeps it — but it is a guess, and the one thing here
+        that is arguably wrong rather than merely undocumented. If a future
+        change decides 405 from the GET means "dead", this is the test that
+        has to change with it.
+        """
+        client = self._client({"HEAD": 405, "GET": 405})
+        assert _is_session_alive(client) is True
+        assert client.session.get.call_count == 1
+
+
+# ── 11. the status sets are derived, not restated ────────────────────────
+
+
+class TestStatusSetsAreDerived:
+    """The redirect set used to be spelled three times and pinned nowhere.
+
+    ``client._REDIRECT_STATUSES``, the same five statuses inlined inside
+    ``auth._SESSION_ALIVE_STATUSES``, and the same five again as a bare tuple
+    in the verdict. No test referenced any of them by name, so nothing noticed
+    if they drifted — a status added to the client's set but not the other two
+    would have made the health check read a redirect as "unreadable, try a GET"
+    and then fall through to True without ever looking at ``Location``.
+
+    ``_is_session_alive`` now derives both from the client's set, so drift
+    inside auth.py is structurally impossible. These tests are what make it
+    stay impossible: they fail if either constant is ever restated by hand.
+    """
+
+    def test_the_alive_set_is_the_redirect_set_plus_three(self):
+        assert auth._SESSION_ALIVE_STATUSES == (
+            client_module._REDIRECT_STATUSES | {200, 401, 403}
+        )
+
+    @pytest.mark.parametrize("status", sorted(client_module._REDIRECT_STATUSES))
+    def test_every_redirect_status_is_read_as_a_redirect(self, status):
+        """Each member of the set must actually drive the redirect verdict.
+
+        This is the half the set comparison above cannot see: the sets can be
+        equal while the *code* still ignores a member. A 3xx that is not in
+        ``_SESSION_ALIVE_STATUSES`` never reaches the verdict at all — HEAD
+        falls back to GET, and the GET's answer for the same status falls
+        through to True — so a member missing from the alive set silently stops
+        being checked against ``Location``.
+        """
+        assert status in auth._SESSION_ALIVE_STATUSES
+
+        to_login = MagicMock()
+        to_login.base = "https://myschool.managebac.cn"
+        to_login.session.head.side_effect = lambda u, **kw: _resp(
+            status, kw, location="https://myschool.managebac.cn/login?next=/x"
+        )
+        assert _is_session_alive(to_login) is False
+        to_login.session.get.assert_not_called()
+
+        elsewhere = MagicMock()
+        elsewhere.base = "https://myschool.managebac.cn"
+        elsewhere.session.head.side_effect = lambda u, **kw: _resp(
+            status, kw, location="https://myschool.managebac.cn/student"
+        )
+        assert _is_session_alive(elsewhere) is True
+        elsewhere.session.get.assert_not_called()
+
+    @pytest.mark.parametrize("status", [200, 401, 403])
+    def test_the_three_non_redirect_members_are_not_redirects(self, status):
+        """The other direction: these three must not be read as redirects.
+
+        If one of them ever joined ``_REDIRECT_STATUSES``, the verdict would
+        start consulting a ``Location`` header that a 200/401/403 does not
+        carry, and the answer would come from whatever happened to be there.
+        """
+        assert status not in client_module._REDIRECT_STATUSES
+
+        client = MagicMock()
+        client.base = "https://myschool.managebac.cn"
+        # A Location header that would say "alive" if it were consulted.
+        client.session.head.side_effect = lambda u, **kw: _resp(
+            status, kw, location="https://myschool.managebac.cn/student"
+        )
+        assert _is_session_alive(client) is (status == 200)
+        client.session.get.assert_not_called()
+
 
 def _resp(status, kwargs, location=None):
     """A minimal stand-in for a requests.Response.
