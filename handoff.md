@@ -90,19 +90,24 @@ PYTHONPATH=$PWD/src /Users/allen/Desktop/t8/mb-crawler/.venv/bin/python -m pytes
 - **5.5 Rate Limiter Thread Safety:** Serialized `_respect_rate_limit` using `self._rate_limit_lock` so concurrent worker threads are properly delayed and spaced out by at least `request_delay`.
 - **Test Suite Hygiene:** Fixed a mock leak in `test_concurrent_get_coalescing` where concurrent threads entered `patch("tahuti.client.time.sleep")`, inadvertently persisting a Mock into subsequent tests.
 
+### 3.8 Removed `count-grade-freq` (commit `b1ac17c`)
+- Deleted `tahuti count-grade-freq` CLI command, `count_grade_frequencies()` client method, and MCP `count_grade_frequencies` tool (-198 lines).
+- Grade statistics are trivially replaced by standard shell one-liners (e.g. `tahuti list --format json | jq -r '.[].score // empty' | sort | uniq -c | sort -nr`).
+
 ---
 
-## 4. Next Step: Local-Only Cached Test Suite
+## 4. Upcoming Architectural Plans (Repo Artifacts)
 
-Instead of synthetic mock HTML strings, future scraper tests will run against **actual cached ManageBac responses** recorded by `ResponseCache`:
-1. `ResponseCache` stores HTTP responses on disk as JSON (`url`, `body`, `status`, `ts`).
-2. When running local tests, `client.cache` will load these recorded pages. Calls to `client._get(url)` will return actual ManageBac HTML offline.
-3. Tests will verify:
-   - Real dashboard class parsing (`get_classes`).
-   - Real task listing and date/status extraction (`get_class_tasks`).
-   - Real attachment URL extraction (both short blob IDs and pre-signed S3 links).
-   - Full crawl aggregation (`crawl_all`).
-4. These cached fixture files will remain local-only / gitignored to protect sensitive student data.
+Detailed technical specifications are documented in `docs/`:
+1. [`docs/plan-refactor-profile-and-grades.md`](docs/plan-refactor-profile-and-grades.md):
+   - **Delete `tahuti grades` entirely:** Task scores and criteria are already crawled by `tahuti list`. The "Expected Grade" calculation was an unweighted heuristic over Highcharts points that ManageBac does not officially expose.
+   - **Single-account flattening:** Remove multi-profile complexity (`--profile`, `profiles.<name>`, `purge_profiles()`, multi-profile merging) in favor of flat `config.json` and `session.json`. Multi-account testing can use standard Unix isolation (`HOME=/dir`).
+   - **Clean credential paths:** Delete stale helper functions (`creds_filename`, `default_creds_path`, `legacy_creds_path`, `creds_paths`, `all_creds_paths`) in favor of direct `resolve_creds_path()`.
+   - **Task verb consolidation (Issue 4):** Fold `submissions` and `feedback` into `tahuti view` and `tahuti submit`.
+2. [`docs/plan-local-cached-tests.md`](docs/plan-local-cached-tests.md):
+   - **Local-only cached replay suite:** Replay real ManageBac HTTP responses recorded in `~/.config/tahuti/cache/` through `ManageBacClient` with a network circuit breaker.
+   - Verifies real dashboard class parsing, task extraction, attachment links, and full crawl aggregation offline.
+   - Strictly local and gitignored to protect sensitive student data; cleanly skipped on CI without cache.
 
 ---
 
@@ -122,7 +127,7 @@ Current test suite status on `fix/mcp-cli-parity-and-efficiency`:
 
 ```bash
 $ PYTHONPATH=$PWD/src /Users/allen/Desktop/t8/mb-crawler/.venv/bin/python -m pytest -q
-1454 passed, 1 xfailed, 1 xpassed in 44.11s
+1449 passed, 1 xfailed, 1 xpassed in 42.66s
 ```
 
-All unit and integration tests pass cleanly.
+All 1,449 unit and integration tests pass cleanly.
