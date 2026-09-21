@@ -45,38 +45,32 @@ def test_invalidate_task_cache(tmp_path: Path):
     assert cache.get(unrelated_url) is not None
 
 
+from bs4 import BeautifulSoup
+
+
 def test_get_class_tasks(tmp_path: Path):
     cache = ResponseCache(cache_dir=tmp_path / "cache", enabled=True)
     client = ManageBacClient("myschool", domain="managebac.cn", cache=cache)
 
-    mock_class_data = {
-        "tasks": [
-            {
-                "task_id": "111",
-                "title": "HW 1",
-                "url": "https://myschool.managebac.cn/student/classes/101/core_tasks/111",
-                "points": "10",
-                "grade_letter": "A",
-                "due_date": "Sep 20, 5:00 PM",
-                "status": "submitted",
-                "has_submit_button": False,
-                "labels": ["Homework", "Submitted"],
-            },
-            {
-                "task_id": "222",
-                "title": "HW 2",
-                "url": "https://myschool.managebac.cn/student/classes/101/core_tasks/222",
-                "points": None,
-                "grade_letter": None,
-                "due_date": "Oct 1, 5:00 PM",
-                "status": "not-submitted",
-                "has_submit_button": True,
-                "labels": ["Homework", "Pending"],
-            },
-        ]
-    }
-
-    with patch.object(client, "get_class_grades", return_value=mock_class_data):
+    html = """
+    <div class="fusion-card-item">
+        <div class="title"><a href="/student/classes/101/core_tasks/111">HW 1</a></div>
+        <div class="points">10</div>
+        <div class="grade">A</div>
+        <div class="date">Sep 20, 5:00 PM</div>
+        <div class="status submitted">Submitted</div>
+        <div class="labels-set"><div class="label">Homework</div><div class="label">Submitted</div></div>
+    </div>
+    <div class="fusion-card-item">
+        <div class="title"><a href="/student/classes/101/core_tasks/222">HW 2</a></div>
+        <div class="date">Oct 1, 5:00 PM</div>
+        <div class="status not-submitted">Pending</div>
+        <a href="/student/classes/101/core_tasks/222/dropbox" class="btn">Submit Work</a>
+        <div class="labels-set"><div class="label">Homework</div><div class="label">Pending</div></div>
+    </div>
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    with patch.object(client, "_get", return_value=soup):
         tasks = client.get_class_tasks("101", class_name="Physics", bypass_cache=True)
 
     assert len(tasks) == 2

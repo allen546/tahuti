@@ -410,7 +410,7 @@ class TestLoginAlwaysPersistsTheSession:
         session_file = Path(os.environ["MANAGEBAC_SESSION"])
         assert session_file.exists()
         saved = json.loads(session_file.read_text())
-        assert saved["profiles"]["default"]["cookie"] == "reusable-cookie"
+        assert saved["cookie"] == "reusable-cookie"
 
     def test_no_password_is_saved_without_the_flag(self, tmp_path, monkeypatch, capsys):
         code, payload, _ = self._run_login(tmp_path, monkeypatch, capsys)
@@ -430,7 +430,7 @@ class TestLoginAlwaysPersistsTheSession:
         session_file = Path(os.environ["MANAGEBAC_SESSION"])
         assert session_file.exists()
         saved = json.loads(session_file.read_text())
-        assert saved["profiles"]["default"]["cookie"] == "reusable-cookie"
+        assert saved["cookie"] == "reusable-cookie"
 
     def test_keep_credentials_saves_the_password(self, tmp_path, monkeypatch, capsys):
         _, payload, _ = self._run_login(

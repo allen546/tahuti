@@ -36,7 +36,6 @@ from tahuti.mcp_server import (
     _sanitize_error,
     delete_submission,
     get_calendar_events,
-    get_class_grades,
     get_ical_feed,
     get_notifications,
     get_teacher_feedback,
@@ -928,104 +927,6 @@ class TestListClassesTool:
         data = json.loads(list_classes())
         assert [c["name"] for c in data["classes"]] == ["Physics (empty)"]
 
-
-class TestGetClassGradesTool:
-    def test_grades_by_id(self, mock_build_client):
-        mock, mock_client = mock_build_client
-        mock_client.get_class_grades.return_value = {
-            "tasks": [{"title": "HW1", "grade_letter": "A"}],
-            "categories": [],
-            "expected_grade": {"letter_grade": "A"},
-        }
-        result = get_class_grades(class_id="100")
-        data = json.loads(result)
-        assert data["class_id"] == "100"
-        assert len(data["tasks"]) == 1
-
-    def test_grades_by_name(self, mock_build_client):
-        mock, mock_client = mock_build_client
-        mock_client.get_classes.return_value = {"100": "Math HL"}
-        mock_client.get_class_grades.return_value = {
-            "tasks": [],
-            "categories": [],
-            "expected_grade": None,
-        }
-        result = get_class_grades(class_name="Math")
-        data = json.loads(result)
-        assert data["class_id"] == "100"
-
-    def test_grades_by_name_uses_the_dashboard_roster(self, mock_build_client):
-        """Resolving a name must agree with what `list_classes` reports."""
-        mock, mock_client = mock_build_client
-        mock_client.get_classes.return_value = {"100": "Math HL"}
-        mock_client.get_class_grades.return_value = {"tasks": [], "expected_grade": None}
-        get_class_grades(class_name="Math")
-        mock_client.get_classes.assert_called_once()
-        mock_client.crawl_all.assert_not_called()
-
-    def test_grades_by_name_resolves_a_class_with_no_tasks(self, mock_build_client):
-        mock, mock_client = mock_build_client
-        mock_client.get_classes.return_value = {"300": "Physics"}
-        mock_client.get_class_grades.return_value = {"tasks": [], "expected_grade": None}
-        data = json.loads(get_class_grades(class_name="Physics"))
-        assert data["class_id"] == "300"
-
-    def test_grades_class_not_found(self, mock_build_client):
-        mock, mock_client = mock_build_client
-        mock_client.get_classes.return_value = {"100": "Math"}
-        result = get_class_grades(class_name="Physics")
-        data = json.loads(result)
-        assert "error" in data
-
-    @pytest.mark.parametrize(
-        "bad_id",
-        [
-            "../../admin",
-            "1000023/../1000024",
-            "1000023?foo=1",
-            "abc",
-            "1 OR 1=1",
-            "  ",
-            "-1",
-            "0x10",
-        ],
-    )
-    def test_rejects_non_numeric_class_id(self, mock_build_client, bad_id):
-        # class_id is interpolated straight into a ManageBac URL path.
-        mock, mock_client = mock_build_client
-        data = json.loads(get_class_grades(class_id=bad_id))
-        assert "error" in data, data
-        assert "class_id" in data["error"]
-        mock_client.get_class_grades.assert_not_called()
-        mock.assert_not_called()
-
-    def test_class_id_is_stripped_before_use(self, mock_build_client):
-        mock, mock_client = mock_build_client
-        mock_client.get_class_grades.return_value = {"tasks": [], "expected_grade": None}
-        data = json.loads(get_class_grades(class_id="  1000023  "))
-        mock_client.get_class_grades.assert_called_once_with("1000023")
-        assert data["class_id"] == "1000023"
-
-    def test_grades_no_params(self, mock_build_client):
-        mock, mock_client = mock_build_client
-        mock_client.get_classes.return_value = {"100": "Math"}
-        mock_client.get_class_grades.return_value = {
-            "tasks": [],
-            "categories": [],
-            "grade_scale": {},
-            "expected_grade": None,
-        }
-        result = get_class_grades()
-        data = json.loads(result)
-        assert "classes_grades" in data
-        mock_client.crawl_all.assert_not_called()
-
-    def test_grades_no_params_covers_a_class_with_no_tasks(self, mock_build_client):
-        mock, mock_client = mock_build_client
-        mock_client.get_classes.return_value = {"300": "Physics"}
-        mock_client.get_class_grades.return_value = {"tasks": [], "expected_grade": None}
-        data = json.loads(get_class_grades())
-        assert "300" in data["classes_grades"]
 
 
 class TestErrorSanitisation:

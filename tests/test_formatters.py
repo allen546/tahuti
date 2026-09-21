@@ -348,194 +348,32 @@ class TestRenderPretty:
         output = render_pretty(payload)
         assert "(no lessons)" in output
 
-    def test_grades(self):
+    def test_view_with_feedback(self):
         payload = ok(
-            "grades",
+            "view",
             "default",
             {
-                "class_id": "123",
-                "tasks": [
-                    {
-                        "task_id": "1",
-                        "title": "HW1",
-                        "grade_letter": "A",
-                        "points": "95/100",
-                        "category": "HW",
-                    }
-                ],
-                "categories": [{"name": "HW", "weight": 0.4}],
-                "expected_grade": {
-                    "letter_grade": "A",
-                    "average_score": 4.5,
-                    "num_graded": 2,
+                "task": {"id": "123", "title": "HW1", "class_name": "Math"},
+                "detail": {},
+                "feedback": {
+                    "general_comments": ["Great work!"],
+                    "feedback_items": [
+                        {"submission_name": "hw1.pdf", "comment": "Good job"}
+                    ],
                 },
             },
         )
         output = render_pretty(payload)
-        assert "Class grades" in output
-        assert "HW1" in output
-        assert "40%" in output
-
-    def test_grades_empty(self):
-        payload = ok(
-            "grades",
-            "default",
-            {"class_id": "1", "tasks": [], "categories": [], "expected_grade": None},
-        )
-        output = render_pretty(payload)
-        assert "(no tasks)" in output
-
-    def test_grades_list(self):
-        payload = ok(
-            "grades.list",
-            "default",
-            {
-                "classes": [
-                    {"id": "1", "name": "Math"},
-                    {"id": "2", "name": "English"},
-                ],
-            },
-        )
-        output = render_pretty(payload)
-        assert "Classes" in output
-        assert "Math" in output
-        assert "English" in output
+        assert "[teacher feedback]" in output
+        assert "Great work!" in output
+        assert "hw1.pdf" in output
+        assert "Good job" in output
 
     def test_unknown_command_falls_through_to_json(self):
         payload = {"ok": True, "command": "unknown_cmd", "data": {"x": 1}}
         output = render_pretty(payload)
         parsed = json.loads(output)
         assert parsed["data"]["x"] == 1
-
-
-class TestRenderPrettySubmissions:
-    """The `submissions` branch (list / delete / add) had no coverage."""
-
-    def test_list_with_rows(self):
-        payload = ok(
-            "submissions",
-            "default",
-            {
-                "action": "list",
-                "task_id": "1000099",
-                "task_title": "Homework 3",
-                "submissions": [
-                    {
-                        "asset_id": "82189817",
-                        "name": "a-very-long-homework-filename-goes-here.pdf",
-                        "uploaded_at": "2026-04-30T10:00:00",
-                        "can_delete": True,
-                        "feedback_url": "https://x/fb",
-                    },
-                    {
-                        "asset_id": "82189818",
-                        "name": "notes.txt",
-                        "uploaded_at": "2026-05-01T09:00:00",
-                        "can_delete": False,
-                    },
-                ],
-            },
-        )
-        output = render_pretty(payload)
-        assert "Submissions for Task 1000099 (Homework 3)" in output
-        assert "total: 2" in output
-        assert "82189817" in output
-        assert "notes.txt" in output
-        assert "Available" in output
-        assert "None" in output
-        # Long names are truncated, not wrapped.
-        assert "a-very-long-homework-filename-..." in output
-
-    def test_list_empty(self):
-        payload = ok(
-            "submissions",
-            "default",
-            {"action": "list", "task_id": "1", "task_title": "", "submissions": []},
-        )
-        output = render_pretty(payload)
-        assert "Submissions for Task 1" in output
-        assert "(no submissions found)" in output
-
-    def test_delete(self):
-        payload = ok(
-            "submissions",
-            "default",
-            {
-                "action": "delete",
-                "task_id": "1",
-                "filename": "hw.pdf",
-                "asset_id": "99",
-                "remaining_submissions": 0,
-                "task_url": "http://x",
-            },
-        )
-        output = render_pretty(payload)
-        assert "deleted submission 'hw.pdf'" in output
-        assert "Asset 99" in output
-        assert "remaining submissions: 0" in output
-
-    def test_add(self):
-        payload = ok(
-            "submissions",
-            "default",
-            {
-                "action": "add",
-                "task_id": "1",
-                "filename": "hw.pdf",
-                "task_url": "http://x",
-            },
-        )
-        output = render_pretty(payload)
-        assert "uploaded file to Task 1" in output
-        assert "hw.pdf" in output
-
-
-class TestRenderPrettyGradesAll:
-    """The `grades.all` branch had no coverage."""
-
-    def test_overview_with_and_without_tasks(self):
-        payload = ok(
-            "grades.all",
-            "default",
-            {
-                "classes_grades": {
-                    "1000023": {
-                        "class_name": "Math HL",
-                        "expected_grade": {"letter_grade": "A", "average_score": 4.5},
-                        "tasks": [
-                            {
-                                "task_id": "1000099",
-                                "title": "HW1",
-                                "grade_letter": "A",
-                                "points": "95/100",
-                            },
-                            {"task_id": "1000100", "title": "Essay", "status": "Submitted"},
-                        ],
-                    },
-                    "1000024": {
-                        "class_name": "Physics",
-                        "expected_grade": None,
-                        "tasks": [],
-                    },
-                }
-            },
-        )
-        output = render_pretty(payload)
-        assert "Grades overview for all classes" in output
-        assert "=== 1000023 | Math HL ===" in output
-        assert "Expected Grade: A (avg 4.5)" in output
-        assert "1000099" in output
-        assert "HW1" in output
-        # A class with no expected grade falls back to "-".
-        assert "Expected Grade: -" in output
-        # A class with no tasks says so instead of rendering an empty block.
-        assert "(no tasks)" in output
-        assert "=== 1000024 | Physics ===" in output
-
-    def test_overview_empty(self):
-        payload = ok("grades.all", "default", {"classes_grades": {}})
-        output = render_pretty(payload)
-        assert "Grades overview for all classes" in output
 
 
 class TestRenderPrettyCountGradeFreq:

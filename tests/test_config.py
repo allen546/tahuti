@@ -160,19 +160,19 @@ class TestSaveProfile:
         save_profile(state)
 
         data = json.loads(config_path.read_text())
-        assert data["profiles"]["default"]["school"] == "myschool"
-        assert data["profiles"]["default"]["email"] == "me@example.com"
+        assert data["school"] == "myschool"
+        assert data["email"] == "me@example.com"
         assert data["version"] == 1
+        assert "profiles" not in data
 
-    def test_preserves_other_profiles(self, tmp_path: Path, monkeypatch):
+    def test_migrates_legacy_profiles_to_flat_schema(self, tmp_path: Path, monkeypatch):
         config_path = tmp_path / "config.json"
         session_path = tmp_path / "session.json"
         config_path.write_text(
             json.dumps(
                 {
                     "profiles": {
-                        "existing": {"school": "old_school"},
-                        "default": {},
+                        "default": {"school": "old_school", "email": "old@example.com"},
                     }
                 }
             )
@@ -182,12 +182,13 @@ class TestSaveProfile:
         monkeypatch.setenv("MANAGEBAC_SESSION", str(session_path))
 
         state = load_state()
+        assert state.profile.school == "old_school"
         state.profile.school = "new_school"
         save_profile(state)
 
         data = json.loads(config_path.read_text())
-        assert data["profiles"]["existing"]["school"] == "old_school"
-        assert data["profiles"]["default"]["school"] == "new_school"
+        assert data["school"] == "new_school"
+        assert "profiles" not in data
 
 
 class TestSaveSession:
@@ -203,53 +204,23 @@ class TestSaveSession:
         save_session(state)
 
         data = json.loads(session_path.read_text())
-        assert data["profiles"]["default"]["cookie"] == "my_cookie"
-        assert data["profiles"]["default"]["base_url"] == "https://myschool.managebac.cn"
+        assert data["cookie"] == "my_cookie"
+        assert data["base_url"] == "https://myschool.managebac.cn"
+        assert "profiles" not in data
 
 
 class TestClearSession:
-    def test_clear_single_profile(self, tmp_path: Path, monkeypatch):
+    def test_clear_session_removes_file(self, tmp_path: Path, monkeypatch):
         config_path = tmp_path / "config.json"
         session_path = tmp_path / "session.json"
         session_path.write_text(
             json.dumps(
                 {
-                    "profiles": {
-                        "default": {"cookie": "c1"},
-                        "other": {"cookie": "c2"},
-                    }
+                    "cookie": "c1",
+                    "school": "myschool",
                 }
             )
         )
-        monkeypatch.setenv("MANAGEBAC_CONFIG", str(config_path))
-        monkeypatch.setenv("MANAGEBAC_SESSION", str(session_path))
-
-        state = load_state()
-        clear_session(state)
-
-        data = json.loads(session_path.read_text())
-        assert "default" not in data["profiles"]
-        assert data["profiles"]["other"]["cookie"] == "c2"
-
-    def test_clear_all_profiles(self, tmp_path: Path, monkeypatch):
-        config_path = tmp_path / "config.json"
-        session_path = tmp_path / "session.json"
-        session_path.write_text(
-            json.dumps(
-                {"profiles": {"default": {"cookie": "c1"}, "other": {"cookie": "c2"}}}
-            )
-        )
-        monkeypatch.setenv("MANAGEBAC_CONFIG", str(config_path))
-        monkeypatch.setenv("MANAGEBAC_SESSION", str(session_path))
-
-        state = load_state()
-        clear_session(state, all_profiles=True)
-        assert not session_path.exists()
-
-    def test_clear_last_profile_removes_file(self, tmp_path: Path, monkeypatch):
-        config_path = tmp_path / "config.json"
-        session_path = tmp_path / "session.json"
-        session_path.write_text(json.dumps({"profiles": {"default": {"cookie": "c1"}}}))
         monkeypatch.setenv("MANAGEBAC_CONFIG", str(config_path))
         monkeypatch.setenv("MANAGEBAC_SESSION", str(session_path))
 
@@ -358,3 +329,68 @@ class TestCacheTTLCoercion:
         """config cannot import .cache (that module imports config for
         config_dir), so the constant is duplicated. Pin them together."""
         assert DEFAULT_CACHE_TTL == DEFAULT_TTL
+
+
+class TestFlatSchema:
+    def test_loads_from_flat_schema(self, tmp_path: Path, monkeypatch):
+        config_path = tmp_path / "config.json"
+        session_path = tmp_path / "session.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "school": "flatschool",
+                    "domain": "managebac.com",
+                    "email": "flat@example.com",
+                    "defaults": {
+                        "view": "upcoming",
+                        "pages": 7,
+                        "subject": "Bio",
+                        "details": True,
+                        "format": "json",
+                        "cache_ttl": 300,
+                    },
+                }
+            )
+        )
+        session_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "school": "flatschool",
+                    "domain": "managebac.com",
+                    "email": "flat@example.com",
+                    "base_url": "https://flatschool.managebac.com",
+                    "cookie": "flat_cookie_xyz",
+                    "logged_in_at": "2026-09-20T12:00:00",
+                }
+            )
+        )
+        monkeypatch.setenv("MANAGEBAC_CONFIG", str(config_path))
+        monkeypatch.setenv("MANAGEBAC_SESSION", str(session_path))
+
+        state = load_state()
+        assert state.profile.school == "flatschool"
+        assert state.profile.email == "flat@example.com"
+        assert state.profile.default_pages == 7
+        assert state.profile.default_subject == "Bio"
+        assert state.session.cookie == "flat_cookie_xyz"
+        assert state.session.base_url == "https://flatschool.managebac.com"
+
+    def test_saves_flat_schema_round_trip(self, tmp_path: Path, monkeypatch):
+        config_path = tmp_path / "config.json"
+        session_path = tmp_path / "session.json"
+        monkeypatch.setenv("MANAGEBAC_CONFIG", str(config_path))
+        monkeypatch.setenv("MANAGEBAC_SESSION", str(session_path))
+
+        state = load_state()
+        state.profile.school = "roundtrip"
+        state.profile.email = "rt@example.com"
+        state.session.cookie = "cookie_rt"
+        save_profile(state)
+        save_session(state)
+
+        reloaded = load_state()
+        assert reloaded.profile.school == "roundtrip"
+        assert reloaded.profile.email == "rt@example.com"
+        assert reloaded.session.cookie == "cookie_rt"

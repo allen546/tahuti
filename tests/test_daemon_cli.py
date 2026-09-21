@@ -74,7 +74,6 @@ def test_cli_daemon_start_background_arg_forwarding():
             with pytest.raises(SystemExit) as exc_info:
                 main([
                     "daemon", "start", "-b",
-                    "--profile", "work",
                     "--webhook-url", "https://hook.example.com",
                     "--interval", "45",
                     "--format", "json",
@@ -82,8 +81,6 @@ def test_cli_daemon_start_background_arg_forwarding():
             assert exc_info.value.code == 0
             call_kwargs = mgr_instance.start_background.call_args[1]
             extra_args = call_kwargs.get("extra_args", [])
-            assert "--profile" in extra_args
-            assert "work" in extra_args
             assert "--webhook-url" in extra_args
             assert "https://hook.example.com" in extra_args
             assert "--poll-interval" in extra_args

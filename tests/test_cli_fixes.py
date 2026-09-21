@@ -61,23 +61,7 @@ def test_pyproject_version_matches_tahuti_version():
     assert match.group(1) == __version__
 
 
-# ── `tahuti submissions --check-feedback <filter>` ───────────────────────
-
-
-class _SubmissionsArgs:
-    def __init__(self, **overrides):
-        self.target = "123"
-        self.id = None
-        self.pages = 10
-        self.list = False
-        self.add = None
-        self.delete = None
-        self.check_feedback = None
-        self.output = None
-        self.format = None
-        self.profile = None
-        for key, value in overrides.items():
-            setattr(self, key, value)
+# ── `tahuti view --feedback` ──────────────────────────────────────────────
 
 
 def _feedback_dict(items):
@@ -103,14 +87,14 @@ def _feedback_item(name, comment="ok"):
     }
 
 
-def test_check_feedback_with_filter_does_not_crash(capsys):
-    """`get_teacher_feedback` returns a dict; iterating it used to raise
-    AttributeError: 'str' object has no attribute 'get'."""
-    from tahuti.__main__ import cmd_submissions
+def test_view_with_feedback(capsys):
+    from tahuti.__main__ import cmd_view
 
     items = [_feedback_item("essay.pdf"), _feedback_item("quiz.pdf")]
     client = MagicMock()
     client.get_teacher_feedback.return_value = _feedback_dict(items)
+    client.find_task_by_id.return_value = {"id": "123", "link": "http://x/classes/456/core_tasks/123"}
+    client.get_task_detail.return_value = {}
     state = MagicMock()
     state.active_profile = "default"
 
@@ -118,65 +102,36 @@ def test_check_feedback_with_filter_does_not_crash(capsys):
         patch("tahuti.__main__._build_client", return_value=(state, client, "a@b.com")),
         patch("tahuti.__main__._authenticate_client"),
         patch("tahuti.__main__._resolve_task_ids", return_value=("456", "123")),
-        patch("tahuti.__main__.load_snapshot", return_value={}),
+        patch("tahuti.__main__.load_snapshot", return_value={"upcoming": [], "past": [], "overdue": []}),
     ):
-        rc = cmd_submissions(_SubmissionsArgs(check_feedback="essay"))
+        rc = cmd_view(_ViewArgs(target="123", feedback=True))
 
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    names = [i["submission_name"] for i in payload["data"]["feedback_items"]]
-    assert names == ["essay.pdf"]
-    # The non-filtered metadata survives the filter.
-    assert payload["data"]["grade"]["grade_letter"] == "A"
-    assert payload["data"]["feedback_count"] == 1
+    assert payload["data"]["feedback"] == _feedback_dict(items)
 
 
-def test_check_feedback_without_filter_returns_everything(capsys):
-    from tahuti.__main__ import cmd_submissions
+def test_view_without_feedback(capsys):
+    from tahuti.__main__ import cmd_view
 
-    items = [_feedback_item("essay.pdf"), _feedback_item("quiz.pdf")]
     client = MagicMock()
-    client.get_teacher_feedback.return_value = _feedback_dict(items)
+    client.find_task_by_id.return_value = {"id": "123", "link": "http://x/classes/456/core_tasks/123"}
+    client.get_task_detail.return_value = {}
     state = MagicMock()
     state.active_profile = "default"
 
     with (
         patch("tahuti.__main__._build_client", return_value=(state, client, "a@b.com")),
         patch("tahuti.__main__._authenticate_client"),
-        patch("tahuti.__main__._resolve_task_ids", return_value=("456", "123")),
-        patch("tahuti.__main__.load_snapshot", return_value={}),
+        patch("tahuti.__main__.load_snapshot", return_value={"upcoming": [], "past": [], "overdue": []}),
     ):
-        rc = cmd_submissions(_SubmissionsArgs(check_feedback=True))
+        rc = cmd_view(_ViewArgs(target="123", feedback=False))
 
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["data"]["feedback_items"]) == 2
-
-
-def test_check_feedback_no_match_returns_empty_list_not_original(capsys):
-    from tahuti.__main__ import cmd_submissions
-
-    items = [_feedback_item("quiz.pdf")]
-    client = MagicMock()
-    client.get_teacher_feedback.return_value = _feedback_dict(items)
-    state = MagicMock()
-    state.active_profile = "default"
-
-    with (
-        patch("tahuti.__main__._build_client", return_value=(state, client, "a@b.com")),
-        patch("tahuti.__main__._authenticate_client"),
-        patch("tahuti.__main__._resolve_task_ids", return_value=("456", "123")),
-        patch("tahuti.__main__.load_snapshot", return_value={}),
-    ):
-        rc = cmd_submissions(_SubmissionsArgs(check_feedback="nomatch"))
-
-    assert rc == 0
-    payload = json.loads(capsys.readouterr().out)
-    # The old code fell back to the *unfiltered* dict on no match, silently
-    # returning feedback the filter was supposed to exclude.
-    assert payload["data"]["feedback_items"] == []
-    assert payload["data"]["feedback_count"] == 0
+    assert payload["ok"] is True
+    assert "feedback" not in payload["data"]
 
 
 # ── `tahuti submit --id` ─────────────────────────────────────────────────

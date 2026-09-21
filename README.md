@@ -10,13 +10,13 @@ Supports both international (`managebac.com`) and China (`managebac.cn`) instanc
 
 1. **Unopinionated Python SDK** (`ManageBacClient`, `ManageBacDaemon`):
    - Authenticate seamlessly via credentials or saved session cookies (`ManageBacClient.from_config()`).
-   - Programmatic access to tasks, submissions, grades, calendar feeds, weekly timetables, and MNN notifications.
+   - Programmatic access to tasks, submissions, calendar feeds, weekly timetables, and MNN notifications.
    - Clean separation of concerns: produces pure, typed data with zero vendor-specific assumptions or hardcoded push rules.
-2. **Interactive CLI** (`tahuti login`, `tahuti list`, `tahuti view`, `tahuti grades`, `tahuti submit`, `tahuti daemon`):
-   - Fast terminal workflows for everyday student tasks: listing assignments, viewing details, uploading files, inspecting grades, checking schedules, and managing background daemons.
+2. **Interactive CLI** (`tahuti login`, `tahuti list`, `tahuti view`, `tahuti submit`, `tahuti daemon`):
+   - Fast terminal workflows for everyday student tasks: listing assignments, viewing details, uploading files, checking schedules, and managing background daemons.
    - Smart output formatting: human-friendly colored tables on interactive TTYs, structured JSON when piped to files or other tools (`jq`).
 3. **MCP Server for AI Coding Assistants**:
-   - Built-in Model Context Protocol server (`tahuti-mcp`) with 14 tools for AI assistants like Claude Desktop, Gemini, and Cursor to inspect deadlines, grades, and coursework.
+   - Built-in Model Context Protocol server (`tahuti-mcp`) with 12 tools for AI assistants like Claude Desktop, Gemini, and Cursor to inspect deadlines and coursework.
 4. **Event Streaming & Webhook Engine**:
    - In-process async event streaming (`async for event in daemon.stream()`) for Python bots and background tasks.
    - Background daemon service (`tahuti daemon run --webhook-url ...`) dispatching typed `MBEvent` payloads to HTTP webhooks with HMAC-SHA256 signatures, exponential backoff retries, stealth jitter, and active-hours scheduling.
@@ -115,17 +115,13 @@ task_detail = client.get_task_detail("/student/classes/1000024/core_tasks/100002
 if task_detail:
     print(task_detail.get("description"))
 
-# 3. Check class grades and computed expected scores
-grades = client.get_class_grades(class_id="1000023")
-print(f"Expected Grade: {grades.get('expected_grade')}")
-
-# 4. View calendar events
+# 3. View calendar events
 events = client.get_calendar_events(start="2026-09-01", end="2026-09-07")
 
-# 5. Fetch weekly timetable
+# 4. Fetch weekly timetable
 timetable = client.get_timetable()
 
-# 6. Upload homework file to assignment dropbox
+# 5. Upload homework file to assignment dropbox
 client.submit_file(
     class_id="1000023",
     task_id="1000026",
@@ -272,17 +268,11 @@ tahuti list --view past                 # past tasks
 tahuti list --subject "Math"            # filter by class/subject
 tahuti list --view overdue --details    # overdue tasks with full descriptions
 tahuti view 1000025                    # view single task by ID
+tahuti view 1000025 --feedback         # view single task with teacher feedback inline
 tahuti view "https://your-school.managebac.com/student/classes/1000024/core_tasks/1000025"
 
-# File Submission
+# File Submission & Downloads
 tahuti submit 1000026 homework.pdf     # upload file to assignment dropbox
-
-# Submission Lifecycle
-tahuti submissions 1000026 --list      # list current submissions for a task
-tahuti submissions 1000026 --add hw.pdf  # upload to the task dropbox
-tahuti submissions 1000026 --delete hw.pdf  # delete a submission by asset ID or filename
-tahuti submissions 1000026 --check-feedback  # teacher feedback for a task
-tahuti submissions 1000026 --check-feedback hw.pdf  # …narrowed to one submission (asset ID or filename)
 tahuti download 1000026                # download every attachment + submission for a task
 tahuti download 1000026 --no-attachments --output-dir ./math  # student submissions only
 tahuti download 1000026 --pages 5      # search 5 pages server-side when the task is not in snapshot.json
@@ -295,12 +285,6 @@ tahuti feedback 1000026                # fetch teacher feedback for a submitted 
 > or the task could not be resolved at all (`task_not_found`, `no_task_link`,
 > `detail_fetch_failed`). Without `--output-dir` the files land in
 > `./task_<id>_<slug>/` under the current directory.
-
-# Grades & Analytics
-tahuti grades                           # grades for every enrolled class
-tahuti grades --class-id 1000023       # detailed task grades for one class
-tahuti grades --subject "Physics"       # fuzzy match class name
-tahuti count-grade-freq                 # grade distribution across all classes
 
 # Notifications & Feed
 tahuti notifications                    # list MNN notifications (page 1)
@@ -400,18 +384,15 @@ permissions are the only barrier protecting a cleartext password. Set
 > hang a daemon or a CI job). Pass `--keep-credentials` once and later commands
 > renew the session by themselves.
 >
-> `tahuti logout` **deletes** this profile's creds file and any OS-keychain
+> `tahuti logout` **deletes** `creds.json` and any OS-keychain
 > entry, as well as clearing the session cookie and the response cache. Pass
-> `logout --keep-credentials` if you want silent re-login preserved instead;
-> `logout --all` clears every profile's file and the legacy global one.
+> `logout --keep-credentials` if you want silent re-login preserved instead.
 >
-> None of those touch the profile itself: the school, domain, email and
+> None of those touch configuration itself: the school, domain, email and
 > `defaults` in `config.json` survive a logout, so the next command still knows
-> which school to talk to. `tahuti logout --purge` removes that entry too —
-> wholesale — and `logout --all --purge` removes every profile's, leaving
-> `config.json` with an empty `profiles` map and no `active_profile` (a later
-> command then uses the default profile name unless you pass `--profile`).
-> `--purge` implies the credential deletion, so combining it with
+> which school to talk to. `tahuti logout --purge` removes those settings too,
+> so the machine forgets the saved account completely.
+> `--purge` implies credential deletion, so combining it with
 > `--keep-credentials` is refused rather than silently doing one or the other.
 >
 > To keep the password out of the cleartext file entirely, combine `--keep-credentials`
@@ -430,7 +411,7 @@ permissions are the only barrier protecting a cleartext password. Set
 `--config <file>` and `--session-file <file>` override the default config and
 session paths, as do the environment variables `MANAGEBAC_CONFIG`,
 `MANAGEBAC_SESSION`, and `MANAGEBAC_CREDS_PATH`. These come from the shared
-auth-flag helper, so they exist on the task, grades, calendar, and submission
+auth-flag helper, so they exist on the task, calendar, and submission
 commands — and on `daemon run` / `daemon start`, which do log in to ManageBac.
 They are **not** on the purely process-level daemon commands, which act on the
 daemon and its own JSON settings rather than on your login. Where those need a
@@ -500,7 +481,7 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-The MCP server exposes 13 tools: `list_tasks`, `view_task`, `submit_file`, `delete_submission`, `get_teacher_feedback`, `get_notifications`, `mark_notification`, `mark_all_notifications_read`, `get_calendar_events`, `get_ical_feed`, `get_timetable`, `list_classes`, and `get_class_grades`.
+The MCP server exposes 12 tools: `list_tasks`, `view_task`, `submit_file`, `delete_submission`, `get_teacher_feedback`, `get_notifications`, `mark_notification`, `mark_all_notifications_read`, `get_calendar_events`, `get_ical_feed`, `get_timetable`, and `list_classes`.
 
 ---
 

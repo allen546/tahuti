@@ -35,7 +35,7 @@ mcp = FastMCP(
     instructions=(
         "ManageBac MCP server. Provides tools to interact with ManageBac: "
         "list/view tasks, submit files, view notifications, calendar events, "
-        "timetables, and class grades."
+        "and timetables."
     ),
 )
 
@@ -934,8 +934,6 @@ def list_classes(
 ) -> str:
     """List all classes for the current student with their IDs.
 
-    Use this to find the class_id for get_class_grades.
-
     Args:
         school: School subdomain
         domain: Base domain
@@ -954,92 +952,12 @@ def list_classes(
     )
     # The roster `crawl_all` itself uses to discover classes: the dashboard
     # scrape (`client.get_classes`). Deriving it from task links instead — which
-    # is what this did, and what `tahuti grades` still does locally — silently
-    # drops every class with no tasks, because an empty class contributes no
+    # silently drops every class with no tasks, because an empty class contributes no
     # link to parse. It also cost a full crawl (dashboard, every class page and
     # the notification hub) to answer a question the dashboard already answers.
     classes_map = client.get_classes()
     classes = [{"id": cid, "name": cname} for cid, cname in classes_map.items()]
     return json.dumps({"classes": classes}, indent=2, ensure_ascii=False)
-
-
-@mcp.tool()
-def get_class_grades(
-    class_id: str | None = None,
-    class_name: str | None = None,
-    school: str | None = None,
-    domain: str | None = None,
-    cookie: str | None = None,
-    profile: str | None = None,
-    verify_tls: bool = True,
-    retry: int = 3,
-) -> str:
-    """Get all grades for a class with expected grade calculation.
-
-    Provide either class_id (numeric) or class_name (fuzzy substring match).
-
-    Args:
-        class_id: Numeric class ID (e.g. "1000023")
-        class_name: Fuzzy match class name (e.g. "EL" matches "CAIE IGCSE G9 EL-L0")
-        school: School subdomain
-        domain: Base domain
-        cookie: Session cookie override
-        profile: Profile name
-        verify_tls: Set to False to disable TLS certificate verification
-        retry: Max retries with exponential backoff (default 3, 0=off)
-    """
-    # class_id is interpolated into f"/student/classes/{class_id}/core_tasks"
-    # inside client.get_class_grades, so a non-numeric value would reach the
-    # server as a raw path component.
-    if class_id:
-        try:
-            class_id = _require_numeric_id(class_id, "class_id", "1000023")
-        except InvalidToolInput as exc:
-            return _invalid_input(exc)
-
-    _state, client, _email = build_client(
-        school=school,
-        domain=domain,
-        cookie=cookie,
-        profile=profile,
-        verify=verify_tls,
-        retry=retry,
-    )
-
-    if not class_id and class_name:
-        # Same roster `list_classes` reports and `crawl_all` discovers with.
-        # Resolving a name from task links instead would contradict both: a
-        # class `list_classes` lists would be "not found" here.
-        classes_map = client.get_classes()
-        for cid, cname in classes_map.items():
-            if class_name.lower() in cname.lower():
-                class_id = cid
-                break
-        if not class_id:
-            return json.dumps(
-                {
-                    "error": f"No class matching '{class_name}'",
-                    "available": list(classes_map.values()),
-                }
-            )
-
-    if not class_id:
-        # Default to loading grades for all classes
-        classes_map = client.get_classes()
-
-        all_grades = {}
-        for cid, cname in classes_map.items():
-            try:
-                c_grades = client.get_class_grades(cid)
-                c_grades["class_name"] = cname
-                all_grades[cid] = c_grades
-            except Exception as e:
-                log.warning("failed to fetch grades for class %s: %s", cid, e)
-        return json.dumps({"classes_grades": all_grades}, indent=2, ensure_ascii=False)
-
-    grades = client.get_class_grades(class_id)
-    grades["class_id"] = class_id
-    return json.dumps(grades, indent=2, ensure_ascii=False)
 
 
 # ── Entry point ─────────────────────────────────────────────────────────
