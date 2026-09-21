@@ -34,7 +34,6 @@ from tahuti.filters import result_views
 from tahuti.mcp_server import (
     _error_payload,
     _sanitize_error,
-    count_grade_frequencies,
     delete_submission,
     get_calendar_events,
     get_class_grades,
@@ -1027,59 +1026,6 @@ class TestGetClassGradesTool:
         mock_client.get_class_grades.return_value = {"tasks": [], "expected_grade": None}
         data = json.loads(get_class_grades())
         assert "300" in data["classes_grades"]
-
-
-class TestCountGradeFrequenciesTool:
-    def test_count_all(self, mock_build_client):
-        mock, mock_client = mock_build_client
-        mock_client.count_grade_frequencies.return_value = {
-            "grades": {"A": 5, "B": 3},
-            "total": 8,
-            "classes": [{"id": "100", "name": "Math"}],
-        }
-        result = count_grade_frequencies()
-        data = json.loads(result)
-        assert data["total"] == 8
-
-    def test_count_by_class(self, mock_build_client):
-        mock, mock_client = mock_build_client
-        mock_client.count_grade_frequencies.return_value = {
-            "grades": {"A": 2},
-            "total": 2,
-            "classes": [{"id": "100", "name": "Math"}],
-        }
-        result = count_grade_frequencies(class_name="Math")
-        data = json.loads(result)
-        mock_client.count_grade_frequencies.assert_called_once_with(class_filter="Math")
-
-    def test_agrees_with_list_classes_about_which_classes_exist(
-        self, mock_build_client
-    ):
-        """Two MCP tools, one answer to "which classes exist".
-
-        `count_grade_frequencies` rebuilt its roster by parsing class links out
-        of `crawl_all`'s tasks, so an empty class contributed no link and was
-        silently dropped here — while `list_classes`, fixed to use the dashboard
-        scrape, reported it. The real client method is bound onto the mock so
-        the tool's own roster is what gets exercised.
-        """
-        mock, mock_client = mock_build_client
-        mock_client.count_grade_frequencies = (
-            ManageBacClient.count_grade_frequencies.__get__(mock_client)
-        )
-        mock_client.get_classes.return_value = {"100": "Math", "200": "Physics (empty)"}
-        mock_client.get_class_grades.side_effect = lambda cid: {
-            "tasks": [{"grade_letter": "A"}] if cid == "100" else []
-        }
-
-        data = json.loads(count_grade_frequencies())
-        listed = {c["id"] for c in json.loads(list_classes())["classes"]}
-        counted = {c["id"] for c in data["classes"]}
-
-        assert counted == {"100", "200"} == listed
-        # The empty class contributes no letters, but it is not erased.
-        assert data["grades"] == {"A": 1}
-        mock_client.crawl_all.assert_not_called()
 
 
 class TestErrorSanitisation:

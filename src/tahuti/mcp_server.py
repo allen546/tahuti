@@ -1042,42 +1042,6 @@ def get_class_grades(
     return json.dumps(grades, indent=2, ensure_ascii=False)
 
 
-# ── Grade frequency ─────────────────────────────────────────────────────
-
-
-@mcp.tool()
-def count_grade_frequencies(
-    class_name: str | None = None,
-    school: str | None = None,
-    domain: str | None = None,
-    cookie: str | None = None,
-    profile: str | None = None,
-    verify_tls: bool = True,
-    retry: int = 3,
-) -> str:
-    """Count frequency of each grade letter across all or one class.
-
-    Args:
-        class_name: Fuzzy match class name (omit for all classes)
-        school: School subdomain
-        domain: Base domain
-        cookie: Session cookie override
-        profile: Profile name
-        verify_tls: Set to False to disable TLS certificate verification
-        retry: Max retries with exponential backoff (default 3, 0=off)
-    """
-    _state, client, _email = build_client(
-        school=school,
-        domain=domain,
-        cookie=cookie,
-        profile=profile,
-        verify=verify_tls,
-        retry=retry,
-    )
-    result = client.count_grade_frequencies(class_filter=class_name)
-    return json.dumps(result, indent=2, ensure_ascii=False)
-
-
 # ── Entry point ─────────────────────────────────────────────────────────
 
 

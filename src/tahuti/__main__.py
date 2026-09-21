@@ -1845,21 +1845,6 @@ def cmd_grades(args) -> int:
     return 0
 
 
-def cmd_count_grade_freq(args) -> int:
-    state, client, email = _build_client(args, "count-grade-freq")
-    _authenticate_client(state, client, email)
-
-    result = client.count_grade_frequencies(class_filter=args.subject)
-    if "error" in result:
-        payload = error("count-grade-freq", "class_not_found", result["error"])
-        print_payload(payload, args.output, args.format)
-        return 1
-
-    payload = ok("count-grade-freq", state.active_profile, result)
-    print_payload(payload, args.output, args.format)
-    return 0
-
-
 def slugify(text: str) -> str:
     text = text.lower()
     text = re.sub(r"[^a-z0-9_\-]+", "_", text)
@@ -2423,15 +2408,6 @@ def build_parser() -> argparse.ArgumentParser:
     grades_p.add_argument("--class-id", help="Class ID (numeric)")
     grades_p.add_argument("--subject", "-s", help="Fuzzy match class name")
     grades_p.set_defaults(func=cmd_grades)
-
-    count_freq_p = subparsers.add_parser(
-        "count-grade-freq", help="Count frequency of each grade letter"
-    )
-    add_common_auth_flags(count_freq_p)
-    count_freq_p.add_argument(
-        "--subject", "-s", help="Restrict to one class (fuzzy match)"
-    )
-    count_freq_p.set_defaults(func=cmd_count_grade_freq)
 
     feedback_p = subparsers.add_parser(
         "feedback", help="Fetch teacher feedback for a submitted task"

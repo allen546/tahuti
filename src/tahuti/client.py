@@ -2368,54 +2368,6 @@ class ManageBacClient:
             "note": "Unweighted average from chart data",
         }
 
-    # ── Grade frequency ─────────────────────────────────────────────────
-
-    def count_grade_frequencies(self, class_filter: str | None = None) -> dict:
-        """Count frequency of each grade letter across all or one class.
-
-        Returns ``{"grades": {"A": 5, "B": 3, ...}, "total": N, "classes": [...]}``.
-        """
-        # The roster `crawl_all` itself discovers classes with: the dashboard
-        # scrape. Deriving it from task links instead — which this did, and
-        # which the MCP `list_classes` tool no longer does — silently drops
-        # every class with no tasks, because an empty class contributes no link
-        # to parse, so two MCP tools answered "which classes exist"
-        # differently. It also cost a full crawl (dashboard, every class page
-        # and the notification hub) to answer a question the dashboard already
-        # answers.
-        classes_map = self.get_classes()
-
-        target_classes: list[tuple[str, str]]
-        if class_filter:
-            target_classes = [
-                (cid, cn)
-                for cid, cn in classes_map.items()
-                if class_filter.lower() in cn.lower()
-            ]
-            if not target_classes:
-                return {
-                    "error": f"No class matching '{class_filter}'",
-                    "available": list(classes_map.values()),
-                }
-        else:
-            target_classes = list(classes_map.items())
-
-        freq: dict[str, int] = {}
-        classes_used: list[dict] = []
-        for cid, cname in target_classes:
-            grades = self.get_class_grades(cid)
-            classes_used.append({"id": cid, "name": cname})
-            for task in grades.get("tasks", []):
-                letter = task.get("grade_letter")
-                if letter:
-                    freq[letter] = freq.get(letter, 0) + 1
-
-        return {
-            "grades": dict(sorted(freq.items())),
-            "total": sum(freq.values()),
-            "classes": classes_used,
-        }
-
     # ── Public crawl methods ────────────────────────────────────────────
 
     def get_tasks_by_view(self, view: str, max_pages: int = 10) -> list[dict]:

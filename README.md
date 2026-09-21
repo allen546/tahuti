@@ -500,7 +500,7 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-The MCP server exposes 14 tools: `list_tasks`, `view_task`, `submit_file`, `delete_submission`, `get_teacher_feedback`, `get_notifications`, `mark_notification`, `mark_all_notifications_read`, `get_calendar_events`, `get_ical_feed`, `get_timetable`, `list_classes`, `get_class_grades`, and `count_grade_frequencies`.
+The MCP server exposes 13 tools: `list_tasks`, `view_task`, `submit_file`, `delete_submission`, `get_teacher_feedback`, `get_notifications`, `mark_notification`, `mark_all_notifications_read`, `get_calendar_events`, `get_ical_feed`, `get_timetable`, `list_classes`, and `get_class_grades`.
 
 ---
 

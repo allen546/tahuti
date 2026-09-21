@@ -48,7 +48,6 @@ class TestBuildParser:
             "calendar",
             "timetable",
             "grades",
-            "count-grade-freq",
             "feedback",
             "submissions",
         }
@@ -162,11 +161,6 @@ class TestBuildParser:
         )
         assert args.class_id == "1000023"
         assert args.subject == "Math"
-
-    def test_count_grade_freq_args(self):
-        parser = build_parser()
-        args = parser.parse_args(["count-grade-freq", "--subject", "EL"])
-        assert args.subject == "EL"
 
     def test_logout_args(self):
         parser = build_parser()
@@ -600,28 +594,6 @@ class TestMainDaemon:
                         ]
                     )
                 assert exc_info.value.code == 0
-
-
-class TestMainCountGradeFreq:
-    def test_count_grade_freq(self, tmp_path: Path, monkeypatch):
-        monkeypatch.setenv("MANAGEBAC_CONFIG", str(tmp_path / "config.json"))
-        monkeypatch.setenv("MANAGEBAC_SESSION", str(tmp_path / "session.json"))
-
-        mock_client = MagicMock()
-        mock_client.count_grade_frequencies.return_value = {
-            "grades": {"A": 3, "B": 2},
-            "total": 5,
-            "classes": [{"id": "100", "name": "Math"}],
-        }
-
-        with patch("tahuti.__main__._build_client") as mock_bc:
-            mock_bc.return_value = _mock_build_client_result(mock_client)
-            with patch("tahuti.auth.save_profile"):
-                with patch("tahuti.auth.save_session"):
-                    with patch("builtins.print"):
-                        with pytest.raises(SystemExit) as exc_info:
-                            main(["count-grade-freq", "--format", "json"])
-                        assert exc_info.value.code == 0
 
 
 def test_reclassify_tasks_uses_canonical_classifier(tmp_path: Path):

@@ -279,14 +279,6 @@ for task in grades_data.get("graded_tasks", []):
     print(f"- {task['title']}: {task['score']} ({task['percentage']}%)")
 ```
 
-### 6.3 Grade Frequencies
-
-```python
-# Summary counts of grade distributions across all classes or a single class
-freqs = client.count_grade_frequencies()
-# e.g., {'7': 12, '6': 18, '5': 3, 'A*': 4}
-```
-
 ---
 
 ## 7. Calendar, Timetables & Schedules
