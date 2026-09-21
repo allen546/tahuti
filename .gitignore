@@ -179,3 +179,8 @@ daemon_state.json
 # manual run is invoked without --output-dir.
 /task_*
 
+# Local response cache dumps and test cache fixtures — strictly confidential.
+tests/fixtures/cache/
+*.cache.json
+
+
