@@ -185,12 +185,12 @@ class TestLogoutDeletesCredentials:
             )
         delete.assert_not_called()
 
-    def test_logout_all_profiles_removes_creds(self, isolated_env):
+    def test_logout_removes_creds(self, isolated_env):
         creds = Path(os.environ["MANAGEBAC_CREDS_PATH"])
         _write_creds(creds)
         with patch("tahuti.cache.ResponseCache") as cache_cls:
             cache_cls.return_value.clear.return_value = 0
-            m.cmd_logout(m.build_parser().parse_args(_logout_argv("--all")))
+            m.cmd_logout(m.build_parser().parse_args(_logout_argv()))
         assert not creds.exists()
 
 
@@ -256,7 +256,7 @@ class TestPasswordIsOptIn:
         self._build()
         assert session.exists()
         saved = json.loads(session.read_text())
-        cookie = saved["profiles"]["default"]["cookie"]
+        cookie = saved["cookie"]
         assert cookie == "newcookie", "the session cookie was not persisted"
 
     def test_the_response_cache_no_longer_follows_the_credential_flags(self, isolated_env):

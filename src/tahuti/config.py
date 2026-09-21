@@ -148,52 +148,6 @@ def default_session_path() -> Path:
     return config_dir() / "session.json"
 
 
-# ── the saved password, keyed by profile ─────────────────────────────────
-#
-# Profiles have been in this config format since the first commit, but the
-# saved-password file was added later without profile keying, so it landed on
-# one global path. The damage was concrete: `logout` on one profile deleted the
-# password every profile was relying on, and two accounts could not both keep
-# one — the second `login` overwrote the first.
-#
-# So the file is per-profile now, with the *default* profile keeping the
-# historical `creds.json` name. That is deliberate: the single-profile install
-# is the common case, and leaving its path untouched means no migration, no
-# surprise, and no second copy of a cleartext password to reason about. The
-# suffix only appears once a second profile exists.
-
-
-def creds_filename(profile: str | None = None) -> str:
-    """The credential filename belonging to *profile*.
-
-    ``creds.json`` for the default profile (the historical name, so an existing
-    install keeps working with no migration), ``creds.<profile>.json`` for any
-    other one.
-    """
-    if not profile or profile == DEFAULT_PROFILE_NAME:
-        return LEGACY_CREDS_FILENAME
-    return f"creds.{profile}.json"
-
-
-def default_creds_path(profile: str | None = None) -> Path:
-    """The file *profile*'s saved password is written to."""
-    return config_dir() / creds_filename(profile)
-
-
-def legacy_creds_path() -> Path:
-    """The pre-per-profile global credential file.
-
-    Kept as a read-only fallback: the password file was written without profile
-    keying while profiles already existed, so a real install (the owner's
-    included) has one account's password sitting in ``creds.json`` whichever
-    profile it was saved from. Without this entry, upgrading would force a
-    re-login for that account. It is *not* a long compatibility tail — the
-    mechanism is weeks old and the fallback exists for files that are on disk
-    right now.
-    """
-    return config_dir() / LEGACY_CREDS_FILENAME
-
-
 def resolve_config_path(explicit: str | None = None) -> Path:
     if explicit:
         return Path(explicit).expanduser()
@@ -212,71 +166,14 @@ def resolve_session_path(explicit: str | None = None) -> Path:
     return default_session_path()
 
 
-def resolve_creds_path(explicit: str | None = None, profile: str | None = None) -> Path:
-    """Resolve the file holding *profile*'s saved password for silent re-login.
-
-    An explicit path, then ``MANAGEBAC_CREDS_PATH`` (deprecated:
-    ``MB_CRAWLER_CREDS_PATH``), then the profile's own file under the config
-    directory.
-    """
+def resolve_creds_path(explicit: str | Path | None = None) -> Path:
+    """Resolve the path to creds.json (explicit arg, env var, or default)."""
     if explicit:
         return Path(explicit).expanduser()
     from_env = env_value(CREDS_ENV, CREDS_ENV_LEGACY)
     if from_env:
         return Path(from_env).expanduser()
-    return default_creds_path(profile)
-
-
-def creds_paths(profile: str | None = None) -> list[Path]:
-    """Every file *profile*'s saved password may live in, best first.
-
-    Normally just the profile's own file. The pre-per-profile global
-    ``creds.json`` is appended **only when the profile's own file does not
-    exist**, which is the case where this profile would read it: the password
-    file was written without profile keying while profiles already existed, so
-    one account's password sits in ``creds.json`` no matter which profile saved
-    it, and an upgrade must not force a re-login for it.
-
-    Callers that *delete* (``logout``) clear every path returned, because
-    leaving the fallback behind would keep the password on disk after the user
-    asked to be logged out — and would let the very next command silently
-    re-login from it. Callers that *write* use the first entry only.
-
-    Nothing is appended when an explicit path or ``MANAGEBAC_CREDS_PATH`` names
-    one exact file, and nothing is appended for the default profile, whose own
-    file *is* ``creds.json``. A profile that already has its own file never
-    reaches for another profile's — that collision is what per-profile
-    credentials exist to remove.
-    """
-    primary = resolve_creds_path(profile=profile)
-    if primary.exists():
-        return [primary]
-    if (
-        profile
-        and profile != DEFAULT_PROFILE_NAME
-        and primary == default_creds_path(profile)
-    ):
-        legacy = legacy_creds_path()
-        if legacy != primary:
-            return [primary, legacy]
-    return [primary]
-
-
-def all_creds_paths() -> list[Path]:
-    """Every credential file on disk, for ``logout --all``.
-
-    Globbed rather than derived from the profile list, so a profile whose
-    ``config.json`` entry has since been removed still has its password
-    deleted. The pattern matches ``creds.json`` and ``creds.<profile>.json``
-    and nothing else this package writes; the dot-prefixed temp files
-    ``_write_json`` creates do not match.
-    """
-    directory = config_dir()
-    found = {p for p in directory.glob("creds*.json") if p.is_file()}
-    # An explicit path or env override can name a file outside that directory,
-    # and `--all` still has to reach it.
-    found.add(resolve_creds_path())
-    return sorted(found)
+    return config_dir() / "creds.json"
 
 
 def clear_creds(path: str | Path) -> bool:
@@ -337,26 +234,32 @@ def load_state(
 
     active_profile = (
         profile_name
-        or session_data.get("active_profile")
         or config_data.get("active_profile")
+        or session_data.get("active_profile")
         or DEFAULT_PROFILE_NAME
     )
 
-    profile_data = _as_dict(_as_dict(config_data.get("profiles")).get(active_profile))
-    defaults = _as_dict(profile_data.get("defaults"))
-    session_profile_data = _as_dict(_as_dict(session_data.get("profiles")).get(active_profile))
+    # Flat root keys first, falling back to legacy profiles shape for backward compatibility
+    if "school" in config_data or "defaults" in config_data:
+        profile_data = config_data
+        defaults = _as_dict(profile_data.get("defaults"))
+    elif "profiles" in config_data:
+        profile_data = _as_dict(_as_dict(config_data.get("profiles")).get(active_profile))
+        defaults = _as_dict(profile_data.get("defaults"))
+    else:
+        profile_data = {}
+        defaults = {}
+
+    if "school" in session_data or "cookie" in session_data or "base_url" in session_data:
+        session_profile_data = session_data
+    elif "profiles" in session_data:
+        session_profile_data = _as_dict(_as_dict(session_data.get("profiles")).get(active_profile))
+    else:
+        session_profile_data = {}
 
     profile = ProfileConfig(
         name=active_profile,
         school=profile_data.get("school"),
-        # No `"managebac.com"` fallback here, deliberately. `dict.get(key)`
-        # returns None for an absent key *and* for a key present with an
-        # explicit null, so a config written by hand or by an older
-        # `save_profile` carrying `"domain": null` lands on exactly the same
-        # `None` as a config with no domain key at all — which is the point:
-        # "unset" has to be representable, or the login prompt cannot tell a
-        # configured machine from a fresh one. `auth.build_client` substitutes
-        # the default, at the one place a domain must become a string.
         domain=profile_data.get("domain"),
         email=profile_data.get("email"),
         default_view=defaults.get("view", "all"),
@@ -364,23 +267,11 @@ def load_state(
         default_subject=defaults.get("subject", ""),
         default_details=defaults.get("details", False),
         default_format=defaults.get("format", "pretty"),
-        # `dict.get(key, default)` returns the default only when the key is
-        # ABSENT. A key present with a null value — `"cache_ttl": null`, which
-        # a hand-edited or schema-defaulted config produces — returns None, and
-        # ResponseCache(ttl=None) then raises `TypeError: '>' not supported
-        # between instances of 'float' and 'NoneType'` on its first get(),
-        # after put() has already written the entry. Coerce here, at the one
-        # place the value enters the system.
         default_cache_ttl=_coerce_cache_ttl(defaults.get("cache_ttl")),
     )
     session = SessionConfig(
         name=active_profile,
         school=session_profile_data.get("school"),
-        # Session falls back to the profile, which is already correct: the
-        # session file is written on every login from the resolved client, so it
-        # normally carries a domain of its own. When it does not, an unset
-        # profile means `None` reaches `SessionConfig` too — still "unset", never
-        # the built-in default, which is what keeps the login prompt honest.
         domain=session_profile_data.get("domain", profile.domain),
         email=session_profile_data.get("email"),
         base_url=session_profile_data.get("base_url"),
@@ -398,10 +289,10 @@ def load_state(
 
 def save_profile(state: AppState) -> None:
     config_data = _read_json(state.config_path)
-    profiles = config_data.get("profiles")
-    if not isinstance(profiles, dict):
-        profiles = config_data["profiles"] = {}
-    profiles[state.active_profile] = {
+    config_data.pop("profiles", None)
+    config_data.pop("active_profile", None)
+    config_data.update({
+        "version": 1,
         "school": state.profile.school,
         "domain": state.profile.domain,
         "email": state.profile.email,
@@ -413,27 +304,23 @@ def save_profile(state: AppState) -> None:
             "format": state.profile.default_format,
             "cache_ttl": state.profile.default_cache_ttl,
         },
-    }
-    config_data["version"] = 1
-    config_data["active_profile"] = state.active_profile
+    })
     _write_json(state.config_path, config_data)
 
 
 def save_session(state: AppState) -> None:
     session_data = _read_json(state.session_path)
-    profiles = session_data.get("profiles")
-    if not isinstance(profiles, dict):
-        profiles = session_data["profiles"] = {}
-    profiles[state.active_profile] = {
+    session_data.pop("profiles", None)
+    session_data.pop("active_profile", None)
+    session_data.update({
+        "version": 1,
         "school": state.session.school,
         "domain": state.session.domain,
         "email": state.session.email,
         "base_url": state.session.base_url,
         "cookie": state.session.cookie,
         "logged_in_at": state.session.logged_in_at,
-    }
-    session_data["version"] = 1
-    session_data["active_profile"] = state.active_profile
+    })
     _write_json(state.session_path, session_data)
 
 
@@ -458,87 +345,32 @@ def load_creds(path: str | Path) -> dict | None:
 
 
 def clear_session(state: AppState, all_profiles: bool = False) -> None:
-    if all_profiles:
-        if state.session_path.exists():
-            state.session_path.unlink()
-        return
-
-    session_data = _read_json(state.session_path)
-    profiles = _as_dict(session_data.get("profiles"))
-    profiles.pop(state.active_profile, None)
-    if profiles:
-        session_data["profiles"] = profiles
-        session_data["version"] = 1
-        session_data["active_profile"] = state.active_profile
-        _write_json(state.session_path, session_data)
-    elif state.session_path.exists():
+    if state.session_path.exists():
         state.session_path.unlink()
 
 
-def purge_profiles(state: AppState, all_profiles: bool = False) -> list[str]:
-    """Delete profile entries from ``config.json``, returning the names removed.
-
-    ``logout`` used to stop at the session, the cache and the credential files,
-    which left the ``profiles.<name>`` entry in place — so a machine that had
-    just been logged out still knew which school it belonged to, and the next
-    command silently re-authenticated against it. This is the other half.
-
-    The entry goes **wholesale**: school, domain, email *and* the ``defaults``
-    block. Emptying the fields instead would leave a half-profile that
-    ``load_state`` happily resolves, so the machine would keep naming a school
-    it no longer has any settings for.
-
-    ``active_profile`` is dropped when it names a profile that is no longer in
-    the map, because otherwise the next command would resolve straight back to
-    the missing name and report an empty profile as configured. With no pointer
-    left, ``load_state`` falls back to :data:`DEFAULT_PROFILE_NAME`, which is
-    the documented outcome: re-supply ``--profile``, or accept the default.
-
-    An empty ``profiles`` map is a shape ``load_state`` already tolerates — it
-    reads ``config_data.get("profiles", {})`` — so ``--purge --all`` leaves a
-    file that still parses and still loads, with every field reporting ``None``.
-    The map is kept rather than removed so a later ``save_profile`` has
-    ``setdefault`` to write into without reconstructing the file.
-
-    Returns the names actually removed, which is empty both when there was
-    nothing to remove and when there was no config file at all. A purge that
-    deleted nothing is not a failure, and the caller reports it as such rather
-    than claiming a deletion that did not happen.
-    """
+def purge_config(state: AppState, all_profiles: bool = False) -> list[str]:
+    """Delete configuration settings from config.json, returning the names removed."""
     config_data = _read_json(state.config_path)
-    profiles = _as_dict(config_data.get("profiles"))
-
-    if all_profiles:
-        targets = sorted(profiles)
-    else:
-        targets = [state.active_profile] if state.active_profile in profiles else []
-
-    removed: list[str] = []
-    for name in targets:
-        # Every name in `targets` was present in the map — `targets` is either
-        # the map's own keys or a membership-checked single name — so the pop
-        # always has something to remove and the name is always reportable. A
-        # profile stored as an explicit null has no entry to lose but is gone
-        # from the map all the same, which is the outcome asked for either way.
-        profiles.pop(name, None)
-        removed.append(name)
-
-    # A pointer still naming a profile that is not in the map — whether this run
-    # just deleted it or it was already gone — would send the next command
-    # straight to a name with nothing behind it. `--purge` is the moment the
-    # operator asked for the profile to stop existing, so clean it up here too.
-    pointer = config_data.get("active_profile")
-    dangling = pointer is not None and pointer not in profiles
-
-    if not removed and not dangling:
+    had_config = any(
+        k in config_data
+        for k in ("school", "domain", "email", "defaults", "profiles")
+    )
+    if not had_config:
         return []
-
-    config_data["profiles"] = profiles
+    removed = (
+        sorted(config_data.get("profiles", {}).keys())
+        if all_profiles and isinstance(config_data.get("profiles"), dict)
+        else [state.active_profile or DEFAULT_PROFILE_NAME]
+    )
+    for k in ("school", "domain", "email", "defaults", "profiles", "active_profile"):
+        config_data.pop(k, None)
     config_data["version"] = 1
-    if dangling:
-        config_data.pop("active_profile", None)
     _write_json(state.config_path, config_data)
     return removed
+
+
+purge_profiles = purge_config
 
 
 def file_mode(path: str | Path) -> int | None:
@@ -572,7 +404,7 @@ def insecure_state_files() -> list[Path]:
     # per-profile now, so checking only one of them would report a clean bill of
     # health while another profile's cleartext password sat at 0644.
     candidates = [
-        *all_creds_paths(),
+        resolve_creds_path(),
         resolve_session_path(),
         resolve_config_path(),
     ]
@@ -740,7 +572,7 @@ _LEGACY_PATHS = {
     "CONFIG_DIR": config_dir,
     "DEFAULT_CONFIG_PATH": default_config_path,
     "DEFAULT_SESSION_PATH": default_session_path,
-    "DEFAULT_CREDS_PATH": default_creds_path,
+    "DEFAULT_CREDS_PATH": resolve_creds_path,
 }
 
 

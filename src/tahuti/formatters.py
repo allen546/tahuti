@@ -289,6 +289,27 @@ def render_pretty(payload: dict) -> str:
                     f"  - {attachment.get('source')}: {attachment.get('name')} "
                     f"-> {display_url(attachment.get('url'))}"
                 )
+
+        feedback = data.get("feedback") or detail.get("feedback")
+        if feedback and isinstance(feedback, dict):
+            lines.append("\n[teacher feedback]")
+            if feedback.get("error"):
+                lines.append(f"  error: {feedback['error']}")
+            else:
+                for comment in feedback.get("general_comments", []):
+                    lines.append(f"  general comment: {comment}")
+                items = feedback.get("feedback_items", [])
+                if not items and not feedback.get("general_comments"):
+                    lines.append("  (no teacher feedback found)")
+                for item in items:
+                    name = item.get("submission_name") or "Submission"
+                    lines.append(f"  - {name}:")
+                    if item.get("comment"):
+                        lines.append(indent(item["comment"], "    "))
+                    for rub in item.get("rubric", []):
+                        lines.append(f"    rubric: {rub.get('criterion', '')} -> {rub.get('score', '')}")
+                    for att in item.get("attachments", []):
+                        lines.append(f"    attachment: {att.get('name')} -> {display_url(att.get('url'))}")
         return "\n".join(lines)
 
     if command == "submit":
@@ -298,64 +319,6 @@ def render_pretty(payload: dict) -> str:
             f"  filename: {data.get('filename')}\n"
             f"  task_url: {data.get('task_url')}"
         )
-
-    if command == "submissions":
-        action = data.get("action", "list")
-        task_id = data.get("task_id", "?")
-        task_title = data.get("task_title") or ""
-        title_part = f" ({task_title})" if task_title else ""
-
-        if action == "list":
-            submissions = data.get("submissions", [])
-            lines = [
-                f"Submissions for Task {task_id}{title_part}",
-                f"  profile: {profile}",
-                f"  total: {len(submissions)}",
-                "",
-            ]
-            if not submissions:
-                lines.append("  (no submissions found)")
-                return "\n".join(lines)
-
-            lines.append(
-                f"  {'Asset ID':<12} {'File Name':<35} {'Uploaded At':<24} {'Deletable':<10} {'Feedback'}"
-            )
-            lines.append("  " + "─" * 92)
-            for s in submissions:
-                aid = str(s.get("asset_id") or "-")
-                name = str(s.get("name") or "-")
-                if len(name) > 33:
-                    name = name[:30] + "..."
-                uploaded = str(s.get("uploaded_at") or "-")
-                deletable = "Yes" if s.get("can_delete") else "No"
-                feedback = (
-                    "Available"
-                    if s.get("feedback_url") or s.get("preview_modal_url")
-                    else "None"
-                )
-                lines.append(
-                    f"  {aid:<12} {name:<35} {uploaded:<24} {deletable:<10} {feedback}"
-                )
-            return "\n".join(lines)
-
-        if action == "delete":
-            filename = data.get("filename", "?")
-            aid = data.get("asset_id", "?")
-            remaining = data.get("remaining_submissions", 0)
-            return (
-                f"✔ Successfully deleted submission '{filename}' (Asset {aid}) from Task {task_id}\n"
-                f"  profile: {profile}\n"
-                f"  remaining submissions: {remaining}\n"
-                f"  task_url: {data.get('task_url')}"
-            )
-
-        if action == "add":
-            return (
-                f"✔ Successfully uploaded file to Task {task_id}\n"
-                f"  profile: {profile}\n"
-                f"  filename: {data.get('filename')}\n"
-                f"  task_url: {data.get('task_url')}"
-            )
 
     if command == "notifications":
         stats = data.get("stats", {})
@@ -430,71 +393,6 @@ def render_pretty(payload: dict) -> str:
             lines.append("  (no lessons)")
         return "\n".join(lines)
 
-    if command == "grades":
-        tasks = data.get("tasks", [])
-        categories = data.get("categories", [])
-        expected = data.get("expected_grade", {}) or {}
-        lines = [
-            "Class grades",
-            f"  profile: {profile}",
-            f"  class_id: {data.get('class_id')}",
-        ]
-        if expected:
-            lines.append(
-                f"  expected_grade: {expected.get('letter_grade', '?')} "
-                f"(avg {expected.get('average_score', '?')}, "
-                f"n={expected.get('num_graded', '?')})"
-            )
-        if categories:
-            lines.append("\n  [categories]")
-            for c in categories:
-                lines.append(f"  - {c.get('name')}: {c.get('weight', 0) * 100:.0f}%")
-        if tasks:
-            lines.append("\n  [tasks]")
-            for t in tasks:
-                grade = t.get("grade_letter") or t.get("status") or "-"
-                pts = t.get("points") or ""
-                cat = t.get("category") or ""
-                lines.append(
-                    f"- {t.get('task_id', '?'):>10}  {grade:<4}  "
-                    f"{pts:<16}  {cat:<25}  {t.get('title', '?')}"
-                )
-        else:
-            lines.append("  (no tasks)")
-        return "\n".join(lines)
-
-    if command == "grades.list":
-        classes = data.get("classes", [])
-        lines = ["Classes"]
-        for c in classes:
-            lines.append(f"  {c.get('id', '?'):<12}  {c.get('name', '?')}")
-        if not classes:
-            lines.append("  (none)")
-        return "\n".join(lines)
-
-    if command == "grades.all":
-        classes_grades = data.get("classes_grades", {})
-        lines = ["Grades overview for all classes", f"  profile: {profile}\n"]
-        for cid, c in classes_grades.items():
-            expected = c.get("expected_grade") or {}
-            expected_str = "-"
-            if expected:
-                expected_str = f"{expected.get('letter_grade', '?')} (avg {expected.get('average_score', '?')})"
-            lines.append(f"=== {cid} | {c.get('class_name', 'Unknown Class')} ===")
-            lines.append(f"  Expected Grade: {expected_str}")
-            
-            tasks = c.get("tasks", [])
-            if tasks:
-                for t in tasks:
-                    grade = t.get("grade_letter") or t.get("status") or "-"
-                    pts = t.get("points") or ""
-                    lines.append(
-                        f"    - {t.get('task_id', '?'):>10}  {grade:<4}  {pts:<16}  {t.get('title', '?')}"
-                    )
-            else:
-                lines.append("    (no tasks)")
-            lines.append("")
-        return "\n".join(lines)
 
     if command == "count-grade-freq":
         grades = data.get("grades", {})

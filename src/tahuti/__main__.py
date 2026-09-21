@@ -55,14 +55,12 @@ from . import __version__
 from . import config
 from . import keychain
 from .config import (
-    all_creds_paths,
     SNAPSHOT_FILENAME,
     clear_creds,
     clear_session,
     config_dir,
     COOKIE_ENV,
     COOKIE_ENV_LEGACY,
-    creds_paths,
     env_value,
     load_state,
     own_state_refusal,
@@ -159,7 +157,11 @@ def _prompt_login_setup(args) -> None:
     if not _stdin_is_interactive() or args.cookie:
         return
     try:
-        state = load_state(args.profile, args.config, args.session_file)
+        state = load_state(
+            getattr(args, "profile", None),
+            getattr(args, "config", None),
+            getattr(args, "session_file", None),
+        )
     except Exception:
         # An absent or unreadable state file must not become a traceback on the
         # way to a prompt; treat it as "nothing has been saved yet".
@@ -217,7 +219,11 @@ def _build_client(args, command: str) -> tuple:
         password = env_value(PASSWORD_ENV, PASSWORD_ENV_LEGACY)
         cookie = env_value(COOKIE_ENV, COOKIE_ENV_LEGACY)
         if not password and not cookie:
-            state = load_state(args.profile, args.config, args.session_file)
+            state = load_state(
+                getattr(args, "profile", None),
+                getattr(args, "config", None),
+                getattr(args, "session_file", None),
+            )
             if not state.session.cookie or getattr(args, "reauth", False):
                 password = getpass.getpass("ManageBac password: ")
     verify = not getattr(args, "no_verify_tls", False)
@@ -231,7 +237,7 @@ def _build_client(args, command: str) -> tuple:
         email=args.email,
         password=password,
         cookie=cookie,
-        profile=args.profile,
+        profile=getattr(args, "profile", None),
         refresh=getattr(args, "refresh", False),
         reauth=getattr(args, "reauth", False),
         verify=verify,
@@ -858,13 +864,28 @@ def cmd_view(args) -> int:
         print_payload(payload, args.output, args.format)
         return 1
 
+    feedback = None
+    if getattr(args, "feedback", False):
+        try:
+            cid, tid = _resolve_task_ids(
+                client, target, getattr(args, "pages", 10), snapshot_path=snapshot_path
+            )
+            feedback = client.get_teacher_feedback(cid, tid)
+        except Exception as exc:
+            log.warning("failed to fetch teacher feedback for task %s: %s", task_id, exc)
+            feedback = {"error": str(exc)}
+
+    view_data = {
+        "task": task,
+        "detail": detail,
+    }
+    if feedback is not None:
+        view_data["feedback"] = feedback
+
     payload = ok(
         "view",
         state.active_profile,
-        {
-            "task": task,
-            "detail": detail,
-        },
+        view_data,
     )
     print_payload(payload, args.output, args.format)
     return 0
@@ -897,8 +918,12 @@ def cmd_logout(args) -> int:
     # through would leave the session gone and the credentials half-kept.
     _reject_purge_with_keep_credentials(args)
 
-    state = load_state(args.profile, args.config, args.session_file)
-    clear_session(state, all_profiles=args.all)
+    state = load_state(
+        getattr(args, "profile", None),
+        getattr(args, "config", None),
+        getattr(args, "session_file", None),
+    )
+    clear_session(state)
 
     # `logout` must actually mean logout: the response cache holds full grade
     # pages and the MNN-hub Bearer JWT, which would otherwise survive.
@@ -917,39 +942,20 @@ def cmd_logout(args) -> int:
     # would keep the cleartext password on disk after the user asked to be
     # logged out, so it goes by default; --keep-credentials opts back into
     # silent re-login for users who find the prompt more annoying than the risk.
-    #
-    # The files cleared are the ones *this profile* authenticates from — its own
-    # `creds.<profile>.json`, plus the pre-per-profile global `creds.json` when
-    # this profile has none of its own and would otherwise read that. Clearing
-    # another profile's file would be the bug per-profile credentials exists to
-    # remove; leaving the fallback behind would let the next command silently
-    # re-login from a password the user just asked to delete.
     creds_removed = False
     keychain_removed = False
     cleared_paths: list[str] = []
     if not getattr(args, "keep_credentials", False):
-        targets = (
-            all_creds_paths() if args.all else creds_paths(profile=state.active_profile)
-        )
-        for path in targets:
-            if clear_creds(path):
-                creds_removed = True
-                cleared_paths.append(str(path))
+        creds_file = resolve_creds_path()
+        if clear_creds(creds_file):
+            creds_removed = True
+            cleared_paths.append(str(creds_file))
         email = _login_email(state)
         if email:
             keychain_removed = keychain.delete(email)
 
-    # The half of "logout" that used to be missing: the session, the cache and
-    # the password went, but the `profiles.<name>` entry in config.json stayed —
-    # so the machine still knew which school it belonged to and the next command
-    # silently re-authenticated against it. `--purge` removes that entry too,
-    # wholesale (school, domain, email and the `defaults` block), which is what
-    # makes the profile genuinely cease to exist rather than merely go quiet.
-    #
-    # `--all` purges every profile's entry; what is left is an empty `profiles`
-    # map with no `active_profile`, which `load_state` already tolerates.
     purged_profiles = (
-        purge_profiles(state, all_profiles=args.all)
+        purge_profiles(state, all_profiles=getattr(args, "all", False))
         if getattr(args, "purge", False)
         else []
     )
@@ -959,7 +965,7 @@ def cmd_logout(args) -> int:
         state.active_profile,
         {
             "logged_out": True,
-            "all_profiles": args.all,
+            "all_profiles": getattr(args, "all", False),
             "cache_entries_removed": cache_cleared,
             "credentials_removed": creds_removed,
             "credential_files_removed": cleared_paths,
@@ -1174,8 +1180,6 @@ def cmd_daemon_start(args) -> int:
         # Secrets go to the child through its environment, never argv: argv is
         # readable by any local user via `ps` for the life of the daemon.
         daemon_secret_env: dict[str, str] = {}
-        if getattr(args, "profile", None):
-            extra_args.extend(["--profile", args.profile])
         if getattr(args, "config", None):
             extra_args.extend(["--config", args.config])
         if getattr(args, "session_file", None):
@@ -1501,141 +1505,6 @@ def cmd_submit(args) -> int:
     return 0
 
 
-def cmd_submissions(args) -> int:
-    state, client, email = _build_client(args, "submissions")
-    _authenticate_client(state, client, email)
-
-    target = args.target or getattr(args, "id", None)
-    if not target:
-        payload = error(
-            "submissions", "missing_target", "Provide a task id or URL"
-        )
-        print_payload(payload, args.output, args.format)
-        return 1
-
-    snapshot_path = _snapshot_path(state)
-    pages = getattr(args, "pages", 10)
-    try:
-        class_id, task_id = _resolve_task_ids(
-            client, target, pages, snapshot_path=snapshot_path
-        )
-    except CommandError as exc:
-        payload = error("submissions", exc.code, exc.message)
-        print_payload(payload, args.output, args.format)
-        return 1
-
-    task_title = None
-    try:
-        snap = load_snapshot(snapshot_path)
-        t_info = find_task_by_id(snap, task_id)
-        if t_info:
-            task_title = t_info.get("title")
-    except Exception:
-        pass
-
-    # 1. Action: --add / --submit
-    if getattr(args, "add", None):
-        file_path = args.add
-        try:
-            result = client.submit_file(class_id, task_id, file_path)
-        except (FileNotFoundError, RuntimeError) as exc:
-            payload = error("submissions", "upload_failed", str(exc))
-            print_payload(payload, args.output, args.format)
-            return 1
-
-        # Eagerly refresh snapshot
-        try:
-            _set_submission_state(snapshot_path, task_id, True, client=client)
-        except Exception:
-            pass
-
-        data = {
-            "action": "add",
-            "task_id": task_id,
-            "filename": result.get("filename"),
-            "task_url": result.get("task_url"),
-        }
-        payload = ok("submissions", state.active_profile, data)
-        print_payload(payload, args.output, args.format)
-        return 0
-
-    # 2. Action: --delete
-    if getattr(args, "delete", None):
-        asset_ident = args.delete
-        try:
-            result = client.delete_submission(class_id, task_id, asset_ident)
-        except (ValueError, RuntimeError) as exc:
-            payload = error("submissions", "delete_failed", str(exc))
-            print_payload(payload, args.output, args.format)
-            return 1
-
-        # Refresh snapshot: if 0 submissions remaining, mark not-submitted
-        try:
-            if result.get("remaining_submissions", 0) == 0:
-                _set_submission_state(snapshot_path, task_id, False, client=client)
-        except Exception:
-            pass
-
-        data = {
-            "action": "delete",
-            "task_id": task_id,
-            "filename": result.get("filename"),
-            "asset_id": result.get("asset_id"),
-            "remaining_submissions": result.get("remaining_submissions", 0),
-            "task_url": result.get("task_url"),
-        }
-        payload = ok("submissions", state.active_profile, data)
-        print_payload(payload, args.output, args.format)
-        return 0
-
-    # 3. Action: --check-feedback
-    if getattr(args, "check_feedback", None) is not None:
-        target_asset = (
-            args.check_feedback
-            if isinstance(args.check_feedback, str)
-            else None
-        )
-        # get_teacher_feedback returns a *dict* (`feedback_items` holds the list),
-        # so filtering has to reach into that key — iterating the dict yields
-        # only its keys, which is what used to crash with AttributeError.
-        feedback_result = client.get_teacher_feedback(class_id, task_id)
-        if target_asset:
-            items = feedback_result.get("feedback_items") or []
-            needle = target_asset.lower()
-            matched = []
-            for item in items:
-                sub_name = (item.get("submission_name") or "").lower()
-                att_names = [
-                    (a.get("name") or "").lower()
-                    for a in (item.get("attachments") or [])
-                ]
-                if needle in sub_name or any(needle in a for a in att_names):
-                    matched.append(item)
-            feedback_result = dict(feedback_result)
-            feedback_result["feedback_items"] = matched
-            feedback_result["feedback_count"] = len(matched)
-        payload = ok("feedback", state.active_profile, feedback_result)
-        print_payload(payload, args.output, args.format)
-        return 0
-
-    # 4. Action: --list or Default (when task ID is provided)
-    # `--list` is the explicit spelling of what already happens by default; the
-    # flag is read rather than ignored so it is echoed back and a future change
-    # to the default cannot silently change what the flag does.
-    explicit_list = bool(getattr(args, "list", False))
-    submissions = client.get_submissions(class_id, task_id)
-    data = {
-        "action": "list",
-        "task_id": task_id,
-        "task_title": task_title,
-        "submissions": submissions,
-    }
-    if explicit_list:
-        data["requested"] = "list"
-    payload = ok("submissions", state.active_profile, data)
-    print_payload(payload, args.output, args.format)
-    return 0
-
 
 def _notification_mutation_payload(
     state, action: str, notification_id, succeeded: bool
@@ -1780,76 +1649,6 @@ def cmd_timetable(args) -> int:
     return 0
 
 
-def cmd_grades(args) -> int:
-    state, client, email = _build_client(args, "grades")
-    _authenticate_client(state, client, email)
-
-    class_id = args.class_id
-    if not class_id:
-        # The roster `crawl_all` itself discovers classes with: the dashboard
-        # scrape. Deriving it from task links instead — which this did, and
-        # which the MCP `list_classes` tool no longer does — silently drops
-        # every class with no tasks, because an empty class contributes no link
-        # to parse, so the two surfaces answered "which classes exist"
-        # differently. It also cost a full crawl (dashboard, every class page
-        # and the notification hub) to answer a question the dashboard already
-        # answers.
-        classes_map = client.get_classes()
-        if not classes_map:
-            payload = error("grades", "no_classes", "No classes found")
-            print_payload(payload, args.output, args.format)
-            return 1
-        if args.subject:
-            for cid, cname in classes_map.items():
-                if args.subject.lower() in cname.lower():
-                    class_id = cid
-                    break
-            if not class_id:
-                payload = error(
-                    "grades",
-                    "class_not_found",
-                    f"No class matching '{args.subject}'",
-                )
-                print_payload(payload, args.output, args.format)
-                return 1
-        else:
-            # Gather grades for ALL classes
-            all_grades = {}
-            failed: dict[str, str] = {}
-            for cid, cname in classes_map.items():
-                try:
-                    c_grades = client.get_class_grades(cid)
-                    c_grades["class_name"] = cname
-                    all_grades[cid] = c_grades
-                except Exception as e:
-                    log.warning("failed to fetch grades for class %s: %s", cid, e)
-                    failed[cid] = str(e)
-            payload = ok(
-                "grades.all",
-                state.active_profile,
-                {
-                    "classes_grades": all_grades,
-                    "failed_classes": failed,
-                },
-            )
-            print_payload(payload, args.output, args.format)
-            # Some classes failing is a usable partial run, but a run where
-            # *every* class failed returned no grades at all and must not look
-            # like one where the account simply has none.
-            return EXIT_OK if all_grades else EXIT_FAILURE
-
-    grades = client.get_class_grades(class_id)
-    grades["class_id"] = class_id
-    payload = ok("grades", state.active_profile, grades)
-    print_payload(payload, args.output, args.format)
-    return 0
-
-
-def slugify(text: str) -> str:
-    text = text.lower()
-    text = re.sub(r"[^a-z0-9_\-]+", "_", text)
-    return text.strip("_")
-
 
 def cmd_feedback(args) -> int:
     """Fetch teacher feedback for all submitted files on a task's dropbox."""
@@ -1879,7 +1678,7 @@ def cmd_feedback(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tahuti",
-        description="Crawl ManageBac tasks, grades & submissions",
+        description="Crawl ManageBac tasks and notifications",
     )
     parser.add_argument(
         "--version",
@@ -1891,11 +1690,6 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def add_common_auth_flags(subparser, include_password: bool = True) -> None:
-        subparser.add_argument(
-            "--profile",
-            default=None,
-            help="Profile name (default: active_profile or default)",
-        )
         subparser.add_argument("--config", help="Path to config JSON")
         subparser.add_argument("--session-file", help="Path to session JSON")
         subparser.add_argument("--school", help="School subdomain (e.g. myschool)")
@@ -2072,13 +1866,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Max pages to search when resolving by id",
     )
+    view.add_argument(
+        "--feedback",
+        action="store_true",
+        help="Fetch teacher feedback for this task",
+    )
     view.set_defaults(func=cmd_view)
 
     logout = subparsers.add_parser("logout", help="Clear persisted session")
-    logout.add_argument("--profile", default=None, help="Profile name")
     logout.add_argument("--config", help="Path to config JSON")
     logout.add_argument("--session-file", help="Path to session JSON")
-    logout.add_argument("--all", action="store_true", help="Remove all saved sessions")
     logout.add_argument(
         "--keep-cache",
         action="store_true",
@@ -2088,18 +1885,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--keep-credentials",
         action="store_true",
         help="Keep the saved password so later commands can log in silently "
-        "(by default `logout` deletes this profile's creds file and any keychain "
-        "entry; `logout --all` deletes every profile's)",
+        "(by default `logout` deletes creds.json and any keychain entry)",
     )
     logout.add_argument(
         "--purge",
         action="store_true",
-        help="Also delete this profile's entry from config.json — school, "
+        help="Also delete configuration from config.json — school, "
         "domain, email and the defaults block — so the machine stops "
-        "remembering which school it belongs to. Implies the credential "
-        "deletion above, so it cannot be combined with --keep-credentials. "
-        "With --all, every profile's entry goes and config.json is left with "
-        "an empty profiles map",
+        "remembering which school it belongs to. Implies credential "
+        "deletion, so it cannot be combined with --keep-credentials.",
     )
     logout.add_argument("--output", "-o", help="Write output to file")
     logout.add_argument(
@@ -2328,37 +2122,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     submit.set_defaults(func=cmd_submit)
 
-    submissions_p = subparsers.add_parser(
-        "submissions",
-        help="Manage task submissions (list, add, delete, check-feedback)",
-    )
-    add_common_auth_flags(submissions_p)
-    submissions_p.add_argument("target", nargs="?", help="Task id or URL")
-    submissions_p.add_argument("--id", help="Task id")
-    submissions_p.add_argument(
-        "--pages",
-        type=int,
-        default=10,
-        help="Max pages to search when resolving by id",
-    )
-    submissions_p.add_argument(
-        "--list", action="store_true", help="List current submissions for the task"
-    )
-    submissions_p.add_argument(
-        "--add", "--submit", dest="add", help="Upload a file to the task dropbox"
-    )
-    submissions_p.add_argument(
-        "--delete", help="Delete a submitted file by asset ID or filename"
-    )
-    submissions_p.add_argument(
-        "--check-feedback",
-        nargs="?",
-        const=True,
-        default=None,
-        help="Check teacher feedback (optionally filter by asset ID or name)",
-    )
-    submissions_p.set_defaults(func=cmd_submissions)
-
     notifications = subparsers.add_parser(
         "notifications", help="View and manage notifications"
     )
@@ -2400,14 +2163,6 @@ def build_parser() -> argparse.ArgumentParser:
     timetable_p.add_argument("--date", help="Start date of week (YYYY-MM-DD)")
     timetable_p.add_argument("--today", action="store_true", help="Show this week")
     timetable_p.set_defaults(func=cmd_timetable)
-
-    grades_p = subparsers.add_parser(
-        "grades", help="View class grades and expected grade"
-    )
-    add_common_auth_flags(grades_p)
-    grades_p.add_argument("--class-id", help="Class ID (numeric)")
-    grades_p.add_argument("--subject", "-s", help="Fuzzy match class name")
-    grades_p.set_defaults(func=cmd_grades)
 
     feedback_p = subparsers.add_parser(
         "feedback", help="Fetch teacher feedback for a submitted task"

@@ -47,9 +47,7 @@ class TestBuildParser:
             "notifications",
             "calendar",
             "timetable",
-            "grades",
             "feedback",
-            "submissions",
         }
         assert set(choices.keys()) == expected
 
@@ -154,18 +152,16 @@ class TestBuildParser:
         assert args.date == "2026-04-28"
         assert args.today is True
 
-    def test_grades_args(self):
+    def test_view_feedback_args(self):
         parser = build_parser()
-        args = parser.parse_args(
-            ["grades", "--class-id", "1000023", "--subject", "Math"]
-        )
-        assert args.class_id == "1000023"
-        assert args.subject == "Math"
+        args = parser.parse_args(["view", "12345", "--feedback"])
+        assert args.target == "12345"
+        assert args.feedback is True
 
     def test_logout_args(self):
         parser = build_parser()
-        args = parser.parse_args(["logout", "--all"])
-        assert args.all is True
+        args = parser.parse_args(["logout", "--keep-credentials"])
+        assert args.keep_credentials is True
 
 
 def _mock_build_client_result(mock_client, email="a@b.com"):
@@ -425,56 +421,7 @@ class TestMainTimetable:
                         assert exc_info.value.code == 0
 
 
-class TestMainGrades:
-    def test_grades_list_classes(self, tmp_path: Path, monkeypatch):
-        monkeypatch.setenv("MANAGEBAC_CONFIG", str(tmp_path / "config.json"))
-        monkeypatch.setenv("MANAGEBAC_SESSION", str(tmp_path / "session.json"))
 
-        mock_client = MagicMock()
-        # The roster is the dashboard scrape, the one `crawl_all` itself
-        # discovers classes with. Deriving it from task links dropped every
-        # class with no tasks, because an empty class has no link to parse.
-        mock_client.get_classes.return_value = {"100": "Math"}
-        mock_client.get_class_grades.return_value = {
-            "tasks": [],
-            "categories": [],
-            "grade_scale": {},
-            "expected_grade": None,
-        }
-
-        with patch("tahuti.__main__._build_client") as mock_bc:
-            mock_bc.return_value = _mock_build_client_result(mock_client)
-            with patch("tahuti.auth.save_profile"):
-                with patch("tahuti.auth.save_session"):
-                    with patch("builtins.print"):
-                        with pytest.raises(SystemExit) as exc_info:
-                            main(["grades", "--format", "json"])
-                        assert exc_info.value.code == 0
-
-        # Answering "which classes exist" from the dashboard costs one request,
-        # not a full crawl of every class page plus the notification hub.
-        mock_client.crawl_all.assert_not_called()
-
-    def test_grades_with_class_id(self, tmp_path: Path, monkeypatch):
-        monkeypatch.setenv("MANAGEBAC_CONFIG", str(tmp_path / "config.json"))
-        monkeypatch.setenv("MANAGEBAC_SESSION", str(tmp_path / "session.json"))
-
-        mock_client = MagicMock()
-        mock_client.get_class_grades.return_value = {
-            "tasks": [],
-            "categories": [],
-            "grade_scale": {},
-            "expected_grade": None,
-        }
-
-        with patch("tahuti.__main__._build_client") as mock_bc:
-            mock_bc.return_value = _mock_build_client_result(mock_client)
-            with patch("tahuti.auth.save_profile"):
-                with patch("tahuti.auth.save_session"):
-                    with patch("builtins.print"):
-                        with pytest.raises(SystemExit) as exc_info:
-                            main(["grades", "--class-id", "100", "--format", "json"])
-                        assert exc_info.value.code == 0
 
 
 class TestMainNotifications:

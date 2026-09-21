@@ -12,8 +12,6 @@ from . import keychain
 from .config import (
     AppState,
     clear_creds,
-    creds_paths,
-    legacy_creds_path,
     load_creds,
     load_state,
     resolve_creds_path,
@@ -73,7 +71,7 @@ def _creds_path(profile: str | None = None) -> str:
     must be able to keep a password each, and ``logout`` of one must not be able
     to reach the other's.
     """
-    return str(resolve_creds_path(profile=profile))
+    return str(resolve_creds_path())
 
 
 def _store_password(
@@ -93,58 +91,22 @@ def _store_password(
     Only ever called when the caller asked for the password to be kept — see
     ``build_client(keep_credentials=...)``.
     """
+    path = resolve_creds_path()
     if keychain.enabled(use_keychain):
         if keychain.store(email, password):
             # Drop any cleartext copy left by an earlier non-keychain login, so
             # switching backends does not leave the password on disk twice.
-            for path in creds_paths(profile=profile):
-                clear_creds(path)
+            clear_creds(path)
             return "keychain"
         log.warning("OS keychain unavailable — falling back to creds.json")
-    path = resolve_creds_path(profile=profile)
     save_creds(path, email, password)
-    _migrate_legacy_creds(profile, email, written=path)
     return "file"
 
 
-def _migrate_legacy_creds(profile: str | None, email: str, written: Path) -> None:
-    """Drop the pre-per-profile global copy once the profile has its own.
-
-    The password file was written to one global path before it was keyed by
-    profile, so an install upgrading mid-life has its password in
-    ``creds.json`` while the profile that now owns it writes
-    ``creds.<profile>.json``. Leaving the old file would mean two cleartext
-    copies of one password, and ``logout`` would have to remember to delete
-    both. Only the copy holding *this* account is removed: a different account's
-    password in the global file is not ours to delete.
-
-    *written* is the file just created. For the default profile it *is* the
-    global file, so there is nothing to migrate — comparing against it is what
-    stops this from deleting the password it was just asked to store.
-    """
-    legacy = legacy_creds_path()
-    if legacy == Path(written) or not legacy.exists():
-        return
-    existing = load_creds(legacy)
-    if existing and existing.get("email") == email:
-        clear_creds(legacy)
-
-
 def _load_creds(email_hint: str | None = None, profile: str | None = None) -> dict | None:
-    """Load saved credentials, consulting the OS keychain as a fallback.
-
-    ``creds.<profile>.json`` wins when it holds a password so an existing
-    install keeps working unchanged. The pre-per-profile global ``creds.json``
-    is tried next when this profile has no file of its own, so an upgrade does
-    not force a re-login. The keychain is consulted when no file carries a
-    password — i.e. after ``tahuti login --keychain`` — using the
-    profile/session email as the account name.
-    """
-    creds = None
-    for path in creds_paths(profile=profile):
-        creds = load_creds(path)
-        if creds is not None:
-            break
+    """Load saved credentials, consulting the OS keychain as a fallback."""
+    path = resolve_creds_path()
+    creds = load_creds(path)
     if creds and creds.get("password"):
         return creds
     account = (creds or {}).get("email") or email_hint
@@ -423,9 +385,8 @@ def _relogin_from_creds(
         raise CommandError(
             "missing_credentials",
             f"Cookie expired and no password is saved for profile "
-            f"{state.active_profile!r} (looked in "
-            f"{', '.join(str(p) for p in creds_paths(profile=state.active_profile))}"
-            "). Run `tahuti login --keep-credentials` once to store one, and "
+            f"{state.active_profile!r} (looked in {resolve_creds_path()}). "
+            "Run `tahuti login --keep-credentials` once to store one, and "
             "later commands will renew the session by themselves; without it, "
             "re-authenticate with `tahuti login`.",
         )

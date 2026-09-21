@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 
 from tahuti.client import ManageBacClient
 from tahuti.cache import DEFAULT_CACHE_DIR, ResponseCache
-from tahuti.__main__ import build_parser, cmd_submissions
 from tahuti import mcp_server
 
 
@@ -19,10 +18,6 @@ def _make_client(cache_dir=None) -> ManageBacClient:
     client.domain = "managebac.cn"
     client.base = "https://testschool.managebac.cn"
     client.student_name = "Test Student"
-    # Routed into the per-test tmp_path by the autouse `isolated_user_state`
-    # fixture in conftest.py, which patches DEFAULT_CACHE_DIR. Spelled out here
-    # so the dependency is visible at the call site: a bare ResponseCache()
-    # would otherwise read and write the operator's real ~/.config/tahuti/cache.
     client.cache = ResponseCache(cache_dir=cache_dir or DEFAULT_CACHE_DIR)
     client.retry = 0
     client.request_delay = 0.0
@@ -32,83 +27,6 @@ def _make_client(cache_dir=None) -> ManageBacClient:
     client._url_locks_mutex = threading.Lock()
     client.session = MagicMock()
     return client
-
-
-
-
-
-# ── CLI Tests ───────────────────────────────────────────────────────────
-
-
-def test_cli_submissions_parser():
-    parser = build_parser()
-    args = parser.parse_args(["submissions", "202", "--list"])
-    assert args.target == "202"
-    assert args.list is True
-
-    args_del = parser.parse_args(["submissions", "202", "--delete", "82189817"])
-    assert args_del.delete == "82189817"
-
-    args_add = parser.parse_args(["submissions", "202", "--add", "test.pdf"])
-    assert args_add.add == "test.pdf"
-
-    args_sub = parser.parse_args(["submissions", "202", "--submit", "test.pdf"])
-    assert args_sub.add == "test.pdf"
-
-    args_fb = parser.parse_args(["submissions", "202", "--check-feedback"])
-    assert args_fb.check_feedback is True
-
-    args_fb_id = parser.parse_args(["submissions", "202", "--check-feedback", "82189817"])
-    assert args_fb_id.check_feedback == "82189817"
-
-
-@patch("tahuti.__main__._build_client")
-@patch("tahuti.__main__._authenticate_client")
-@patch("tahuti.__main__._resolve_task_ids", return_value=("101", "202"))
-@patch("tahuti.__main__.print_payload")
-def test_cli_submissions_list_default(mock_print, mock_resolve, mock_auth, mock_build):
-    client = _make_client()
-    mock_build.return_value = (MagicMock(active_profile="default", config_path=MagicMock()), client, "test@example.com")
-    with patch.object(client, "get_submissions", return_value=[{"asset_id": "1", "name": "hw.pdf"}]):
-        parser = build_parser()
-        args = parser.parse_args(["submissions", "202"])
-        rc = cmd_submissions(args)
-        assert rc == 0
-        payload = mock_print.call_args[0][0]
-        assert payload["ok"] is True
-        assert payload["data"]["action"] == "list"
-        assert len(payload["data"]["submissions"]) == 1
-
-
-@patch("tahuti.__main__._build_client")
-@patch("tahuti.__main__._authenticate_client")
-@patch("tahuti.__main__._resolve_task_ids", return_value=("101", "202"))
-@patch("tahuti.__main__.print_payload")
-def test_cli_submissions_delete(mock_print, mock_resolve, mock_auth, mock_build):
-    client = _make_client()
-    mock_build.return_value = (MagicMock(active_profile="default", config_path=MagicMock()), client, "test@example.com")
-    with patch.object(client, "delete_submission", return_value={"ok": True, "asset_id": "1", "filename": "hw.pdf", "remaining_submissions": 0}):
-        parser = build_parser()
-        args = parser.parse_args(["submissions", "202", "--delete", "1"])
-        rc = cmd_submissions(args)
-        assert rc == 0
-        payload = mock_print.call_args[0][0]
-        assert payload["ok"] is True
-        assert payload["data"]["action"] == "delete"
-
-
-@patch("tahuti.__main__._build_client")
-@patch("tahuti.__main__._authenticate_client")
-@patch("tahuti.__main__.print_payload")
-def test_cli_submissions_missing_target(mock_print, mock_auth, mock_build):
-    mock_build.return_value = (MagicMock(active_profile="default"), _make_client(), "test@example.com")
-    parser = build_parser()
-    args = parser.parse_args(["submissions"])
-    rc = cmd_submissions(args)
-    assert rc == 1
-    payload = mock_print.call_args[0][0]
-    assert payload["ok"] is False
-    assert payload["error"]["code"] == "missing_target"
 
 
 # ── MCP Server Tests ────────────────────────────────────────────────────

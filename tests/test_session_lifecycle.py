@@ -36,11 +36,7 @@ from tahuti import __main__ as main_module
 from tahuti.auth import _is_session_alive, build_client
 from tahuti.__main__ import build_parser, main
 from tahuti.config import (
-    all_creds_paths,
-    creds_filename,
-    creds_paths,
-    default_creds_path,
-    legacy_creds_path,
+    config_dir,
     load_creds,
     resolve_config_path,
     resolve_creds_path,
@@ -223,6 +219,8 @@ def _saved_cookie() -> str | None:
     if not path.exists():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("cookie"):
+        return data["cookie"]
     for profile_data in (data.get("profiles") or {}).values():
         if profile_data.get("cookie"):
             return profile_data["cookie"]
@@ -235,7 +233,7 @@ def _cache_dir(email: str = EMAIL) -> Path:
 
 
 def _no_creds_anywhere() -> bool:
-    return not any(p.exists() for p in all_creds_paths())
+    return not resolve_creds_path().exists()
 
 
 # ── 1. the default: session saved, password not ───────────────────────────
@@ -311,7 +309,7 @@ class TestKeepCredentials:
             )
         assert exc_info.value.code == 0
         assert json.loads(capsys.readouterr().out)["data"]["credentials_saved"] is True
-        assert load_creds(default_creds_path()) == {
+        assert load_creds(resolve_creds_path()) == {
             "email": EMAIL,
             "password": PASSWORD,
         }
@@ -348,7 +346,7 @@ class TestKeepCredentials:
                 keep_credentials=True,
                 use_keychain=True,
             )
-        assert load_creds(default_creds_path())["password"] == PASSWORD
+        assert load_creds(resolve_creds_path())["password"] == PASSWORD
 
     def test_it_decides_where_not_whether(self, state_dir, managebac):
         """`--keychain` / `--no-keychain` alone still keeps nothing."""
@@ -400,7 +398,7 @@ class TestNoRememberMe:
         """One flag is server-side, the other is local disk."""
         self._login(managebac, "--no-remember-me", "--keep-credentials")
         assert "remember_me" not in managebac.last_body
-        assert load_creds(default_creds_path())["password"] == PASSWORD
+        assert load_creds(resolve_creds_path())["password"] == PASSWORD
 
     def test_alone_it_saves_no_password(self, state_dir, managebac):
         self._login(managebac, "--no-remember-me")
@@ -413,7 +411,7 @@ class TestNoRememberMe:
     def test_a_silent_renewal_honours_it_too(self, state_dir, managebac):
         """`_relogin_from_creds` used to hardcode ``remember=True``."""
         _write_session(cookie="dead-cookie")
-        save_creds(default_creds_path(), EMAIL, PASSWORD)
+        save_creds(resolve_creds_path(), EMAIL, PASSWORD)
 
         with patch("tahuti.auth._is_session_alive", return_value=False):
             build_client(school=SCHOOL, password=None, remember_me=None)
@@ -455,7 +453,7 @@ class TestDeadCookieWithoutAPassword:
             build_client(school=SCHOOL, profile="school", password=None)
 
         assert "school" in exc_info.value.message
-        assert str(default_creds_path("school")) in exc_info.value.message
+        assert str(resolve_creds_path()) in exc_info.value.message
 
     def test_the_daemon_reports_it_rather_than_dying_silently(
         self, state_dir, managebac, caplog
@@ -478,7 +476,7 @@ class TestDeadCookieWithoutAPassword:
 class TestDeadCookieWithAPassword:
     def test_renews_and_persists_the_new_cookie(self, state_dir, managebac):
         _write_session(cookie="dead-cookie")
-        save_creds(default_creds_path(), EMAIL, PASSWORD)
+        save_creds(resolve_creds_path(), EMAIL, PASSWORD)
 
         with patch("tahuti.auth._is_session_alive", return_value=False):
             state, client, email = build_client(school=SCHOOL, password=None)
@@ -491,7 +489,7 @@ class TestDeadCookieWithAPassword:
     def test_the_daemons_refresh_entry_point_persists_too(self, state_dir, managebac):
         """The daemon holds its client and cannot call build_client mid-loop."""
         _write_session(cookie="dead-cookie")
-        save_creds(default_creds_path(), EMAIL, PASSWORD)
+        save_creds(resolve_creds_path(), EMAIL, PASSWORD)
 
         with patch("tahuti.auth._is_session_alive", return_value=False):
             state, client, _email = build_client(school=SCHOOL, password=None)
@@ -512,7 +510,7 @@ class TestDeadCookieWithAPassword:
         by a renewal that had not actually succeeded.
         """
         _write_session(cookie="still-current-cookie")
-        save_creds(default_creds_path(), EMAIL, "wrong-password")
+        save_creds(resolve_creds_path(), EMAIL, "wrong-password")
         # The server answers the POST by landing back on /sessions, which is how
         # `login()` reports rejected credentials.
         managebac.reject_next_login()
@@ -569,175 +567,75 @@ class TestCachePolicy:
         assert list(cache.glob("*.json")) == []
 
 
-# ── 7. per-profile credentials ────────────────────────────────────────────
+# ── 7. credentials management ─────────────────────────────────────────────
 
 
-class TestPerProfileCredentials:
-    def test_the_filename_is_per_profile(self, state_dir):
-        assert creds_filename() == "creds.json"
-        assert creds_filename("default") == "creds.json"
-        assert creds_filename("school") == "creds.school.json"
-        assert default_creds_path("school").name == "creds.school.json"
+class TestCredentialsManagement:
+    def test_default_creds_path(self, state_dir):
+        assert resolve_creds_path().name == "creds.json"
+        assert resolve_creds_path() == config_dir() / "creds.json"
 
-    def test_two_profiles_keep_independent_passwords(self, state_dir):
-        _write_config("default", "school")
-        save_creds(default_creds_path(), "home@example.com", "home-pw")
-        save_creds(default_creds_path("school"), "school@example.com", "school-pw")
+    def test_save_and_load_creds(self, state_dir):
+        _write_config("default")
+        creds = resolve_creds_path()
+        save_creds(creds, "home@example.com", "home-pw")
+        loaded = load_creds(creds)
+        assert loaded is not None
+        assert loaded["password"] == "home-pw"
+        assert loaded["email"] == "home@example.com"
 
-        assert load_creds(default_creds_path())["password"] == "home-pw"
-        assert load_creds(default_creds_path("school"))["password"] == "school-pw"
-
-    def test_logging_out_one_profile_leaves_the_others_password(
-        self, state_dir, capsys
-    ):
-        _write_config("default", "school")
-        _write_session(cookie="live-cookie", profile="school")
-        save_creds(default_creds_path(), "home@example.com", "home-pw")
-        school_creds = default_creds_path("school")
-        save_creds(school_creds, "school@example.com", "school-pw")
+    def test_logging_out_clears_credentials(self, state_dir, capsys):
+        _write_config("default")
+        _write_session(cookie="live-cookie")
+        creds = resolve_creds_path()
+        save_creds(creds, "home@example.com", "home-pw")
 
         with pytest.raises(SystemExit) as exc_info:
-            main(["logout", "--profile", "school", "--format", "json"])
+            main(["logout", "--format", "json"])
         assert exc_info.value.code == 0
 
-        assert not school_creds.exists(), "the profile's own password survived logout"
-        assert default_creds_path().exists(), (
-            "logout reached another profile's password"
-        )
+        assert not creds.exists(), "credentials survived logout"
         payload = json.loads(capsys.readouterr().out)
         assert payload["data"]["credentials_removed"] is True
 
-    def test_logout_all_clears_every_profile_and_the_legacy_file(
-        self, state_dir, capsys
-    ):
-        _write_config("default", "school", "tutoring")
-        for profile in ("school", "tutoring"):
-            save_creds(default_creds_path(profile), f"{profile}@example.com", "pw")
-        # The default profile's file *is* the historical global one — that is the
-        # scheme — so "every profile plus the legacy file" is three paths, and
-        # the default's password must not survive as a separate copy.
-        legacy = legacy_creds_path()
-        save_creds(legacy, "home@example.com", "pw")
-        assert all_creds_paths() == sorted(
-            [legacy, default_creds_path("school"), default_creds_path("tutoring")]
-        )
-
-        with pytest.raises(SystemExit) as exc_info:
-            main(["logout", "--all", "--format", "json"])
-        assert exc_info.value.code == 0
-
-        for path in all_creds_paths():
-            assert not path.exists(), f"{path} survived `logout --all`"
-
-    def test_logout_all_reaches_a_file_outside_the_config_dir(
-        self, state_dir, monkeypatch, capsys
-    ):
-        """``MANAGEBAC_CREDS_PATH`` can name a file the glob would never see."""
+    def test_logout_clears_creds_at_custom_path(self, state_dir, monkeypatch, capsys):
+        """MANAGEBAC_CREDS_PATH can name a file outside config_dir()."""
         elsewhere = state_dir / "elsewhere-creds.json"
         monkeypatch.setenv("MANAGEBAC_CREDS_PATH", str(elsewhere))
         save_creds(elsewhere, "elsewhere@example.com", "pw")
 
         with pytest.raises(SystemExit):
-            main(["logout", "--all", "--format", "json"])
+            main(["logout", "--format", "json"])
         assert not elsewhere.exists()
 
-    def test_a_kept_password_migrates_off_the_legacy_file(self, state_dir, managebac):
-        """The upgrade path must not end up with two cleartext copies."""
-        _write_config("school")
-        legacy = legacy_creds_path()
-        save_creds(legacy, EMAIL, PASSWORD)
-
-        build_client(
-            school=SCHOOL,
-            email=EMAIL,
-            password=PASSWORD,
-            profile="school",
-            keep_credentials=True,
-        )
-
-        assert load_creds(default_creds_path("school"))["password"] == PASSWORD
-        assert not legacy.exists(), "the pre-per-profile copy was left behind"
-
-    def test_a_different_account_in_the_legacy_file_is_left_alone(
-        self, state_dir, managebac
-    ):
-        """Migration removes this account's stale copy, never someone else's."""
-        _write_config("school")
-        legacy = legacy_creds_path()
-        save_creds(legacy, "someone-else@example.com", "their-password")
-
-        build_client(
-            school=SCHOOL,
-            email=EMAIL,
-            password=PASSWORD,
-            profile="school",
-            keep_credentials=True,
-        )
-
-        assert load_creds(legacy)["password"] == "their-password"
-        assert load_creds(default_creds_path("school"))["password"] == PASSWORD
+    def test_explicit_path_passed_to_resolve_creds_path(self, state_dir):
+        custom = state_dir / "custom.json"
+        assert resolve_creds_path(custom) == custom
 
 
-# ── 8. the pre-per-profile global file is still read ──────────────────────
+# ── 8. credentials loading ────────────────────────────────────────────────
 
 
-class TestLegacyCredsFallback:
-    def test_a_profile_with_no_file_of_its_own_reads_the_global_one(self, state_dir):
-        _write_config("school")
-        save_creds(legacy_creds_path(), "legacy@example.com", "legacy-pw")
+class TestCredentialsLoading:
+    def test_load_creds_from_resolved_path(self, state_dir):
+        creds = resolve_creds_path()
+        save_creds(creds, "student@example.com", "pw123")
+        loaded = auth._load_creds()
+        assert loaded is not None
+        assert loaded["email"] == "student@example.com"
+        assert loaded["password"] == "pw123"
 
-        assert creds_paths(profile="school") == [
-            default_creds_path("school"),
-            legacy_creds_path(),
-        ]
-        assert auth._load_creds(profile="school") == {
-            "email": "legacy@example.com",
-            "password": "legacy-pw",
-        }
+    def test_load_creds_returns_none_when_missing(self, state_dir):
+        assert auth._load_creds() is None
 
-    def test_its_own_file_wins_over_the_global_one(self, state_dir):
-        _write_config("school")
-        save_creds(legacy_creds_path(), "legacy@example.com", "legacy-pw")
-        save_creds(default_creds_path("school"), "school@example.com", "school-pw")
-
-        assert creds_paths(profile="school") == [default_creds_path("school")]
-        assert auth._load_creds(profile="school")["password"] == "school-pw"
-
-    def test_the_default_profile_never_needs_the_fallback(self, state_dir):
-        """Its own file *is* the global one, so there is nothing to fall back to."""
-        save_creds(legacy_creds_path(), "a@example.com", "pw")
-        assert creds_paths() == [legacy_creds_path()]
-        assert creds_paths(profile="default") == [legacy_creds_path()]
-
-    def test_an_upgraded_install_authenticates_without_being_reprompted(
-        self, state_dir, managebac
-    ):
-        """End to end: an existing global creds.json keeps working."""
-        _write_config("school")
-        _write_session(cookie="dead-cookie", profile="school")
-        save_creds(legacy_creds_path(), "legacy@example.com", PASSWORD)
-
-        with patch("tahuti.auth._is_session_alive", return_value=False):
-            state, client, email = build_client(
-                school=SCHOOL, profile="school", password=None
-            )
-
-        # The profile's own email is authoritative; the *password* came from the
-        # pre-per-profile file, which is what "not force-reprompted" means.
-        assert email == "school@example.com"
-        assert managebac.last_body["password"] == PASSWORD
-        assert client.session.cookies.get("_managebac_session") == "fresh-cookie"
-        assert _saved_cookie() == "fresh-cookie"
-
-    def test_an_explicit_path_gets_no_fallback(self, state_dir, monkeypatch):
-        """``MANAGEBAC_CREDS_PATH`` names one file; reading another would be a lie."""
-        _write_config("school")
-        elsewhere = state_dir / "named.json"
-        monkeypatch.setenv("MANAGEBAC_CREDS_PATH", str(elsewhere))
-        save_creds(legacy_creds_path(), "legacy@example.com", "legacy-pw")
-
-        assert creds_paths(profile="school") == [elsewhere]
-        assert auth._load_creds(profile="school") is None
+    def test_load_creds_with_custom_env(self, state_dir, monkeypatch):
+        custom = state_dir / "custom.json"
+        monkeypatch.setenv("MANAGEBAC_CREDS_PATH", str(custom))
+        save_creds(custom, "custom@example.com", "custom-pw")
+        loaded = auth._load_creds()
+        assert loaded is not None
+        assert loaded["email"] == "custom@example.com"
+        assert loaded["password"] == "custom-pw"
 
 
 # ── 9. the MANAGEBAC_* rename ─────────────────────────────────────────────

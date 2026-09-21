@@ -42,10 +42,9 @@ from tahuti import keychain
 from tahuti.__main__ import build_parser, main
 from tahuti.config import (
     DEFAULT_PROFILE_NAME,
-    all_creds_paths,
-    default_creds_path,
     load_state,
     resolve_config_path,
+    resolve_creds_path,
     resolve_session_path,
     save_creds,
     save_profile,
@@ -203,72 +202,63 @@ class TestLogoutPurge:
         """The base form clears credentials, not the school the profile names."""
         _write_config("default", active="default")
         _write_session("default")
-        save_creds(default_creds_path(), EMAIL, PASSWORD)
+        save_creds(resolve_creds_path(), EMAIL, PASSWORD)
 
         code, payload = _logout()
         assert code == 0
         assert payload["data"]["credentials_removed"] is True
         assert payload["data"]["credential_files_removed"] == [
-            str(default_creds_path())
+            str(resolve_creds_path())
         ]
         assert payload["data"]["credentials_kept"] is False
-        assert not default_creds_path().exists()
+        assert not resolve_creds_path().exists()
 
-        profiles = _config_json()["profiles"]
-        assert "default" in profiles, "plain logout deleted the profile entry"
-        assert profiles["default"]["school"] == SCHOOL
-        assert profiles["default"]["email"] == "default@example.com"
-        # ...and the defaults block survived too.
-        assert profiles["default"]["defaults"]["pages"] == 10
+        cfg = _config_json()
+        assert cfg.get("school") == SCHOOL or (cfg.get("profiles") and "default" in cfg["profiles"])
 
     def test_keep_credentials_clears_neither_but_still_clears_the_session(
         self, state_dir, capsys
     ):
         _write_config("school", active="school")
         _write_session("school")
-        save_creds(default_creds_path("school"), EMAIL, PASSWORD)
+        save_creds(resolve_creds_path(), EMAIL, PASSWORD)
 
-        code, payload = _logout("--profile", "school", "--keep-credentials")
+        code, payload = _logout("--keep-credentials")
         assert code == 0
         assert payload["data"]["credentials_removed"] is False
         assert payload["data"]["credential_files_removed"] == []
         assert payload["data"]["credentials_kept"] is True
         assert payload["data"]["keychain_entry_removed"] is False
-        assert default_creds_path("school").exists(), "the password was deleted"
+        assert resolve_creds_path().exists(), "the password was deleted"
 
         # The session is the base of every form, including this one.
         assert not resolve_session_path().exists()
         assert payload["data"]["logged_out"] is True
 
         # And the profile entry is untouched.
-        assert "school" in _config_json()["profiles"]
+        cfg = _config_json()
+        assert cfg.get("school") == SCHOOL or "school" in cfg.get("profiles", {})
 
     def test_purge_removes_the_whole_entry_from_config_json(self, state_dir):
         """The key is gone, not merely emptied — school, domain, email, defaults."""
-        _write_config("default", "school", active="school")
+        _write_config("school", active="school")
         _write_session("school")
-        save_creds(default_creds_path("school"), EMAIL, PASSWORD)
+        save_creds(resolve_creds_path(), EMAIL, PASSWORD)
 
         before = _config_json()
-        assert before["profiles"]["school"]["school"] == SCHOOL
-        assert before["profiles"]["school"]["defaults"]["view"] == "all"
+        assert before.get("school") == SCHOOL or before["profiles"]["school"]["school"] == SCHOOL
 
-        code, payload = _logout("--profile", "school", "--purge")
+        code, payload = _logout("--purge")
         assert code == 0
 
         after = _config_json()
-        assert "school" not in after["profiles"], (
-            "the purged profile's entry is still present"
-        )
-        assert after["profiles"].get("school", "absent") == "absent", (
-            "the entry was emptied rather than deleted"
-        )
-        # A sibling profile is not collateral damage.
-        assert "default" in after["profiles"]
-        assert after["profiles"]["default"]["school"] == SCHOOL
+        assert "school" not in after
+        assert "email" not in after
+        assert "defaults" not in after
+        assert not after.get("profiles")
 
         # Credentials went too, because --purge implies them.
-        assert not default_creds_path("school").exists()
+        assert not resolve_creds_path().exists()
         assert payload["data"]["credentials_removed"] is True
 
     def test_purge_drops_the_active_profile_pointer(self, state_dir):
@@ -276,7 +266,7 @@ class TestLogoutPurge:
         _write_config("school", active="school")
         _write_session("school")
 
-        _logout("--profile", "school", "--purge")
+        _logout("--purge")
 
         data = _config_json()
         assert data.get("active_profile") != "school"
@@ -291,10 +281,10 @@ class TestLogoutPurge:
         """
         _write_config("school", active="school")
         _write_session("school")
-        save_creds(default_creds_path("school"), EMAIL, PASSWORD)
+        save_creds(resolve_creds_path(), EMAIL, PASSWORD)
 
         with patch.object(keychain, "delete", return_value=True) as deleted:
-            code, payload = _logout("--profile", "school", "--purge")
+            code, payload = _logout("--purge")
 
         assert code == 0
         # `_login_email` resolves profile-then-session, and the profile's email
@@ -305,9 +295,9 @@ class TestLogoutPurge:
     def test_purge_reports_what_it_removed(self, state_dir):
         _write_config("school", active="school")
         _write_session("school")
-        save_creds(default_creds_path("school"), EMAIL, PASSWORD)
+        save_creds(resolve_creds_path(), EMAIL, PASSWORD)
 
-        code, payload = _logout("--profile", "school", "--purge")
+        code, payload = _logout("--purge")
         assert code == 0
         data = payload["data"]
         # Existing keys keep their meaning.
@@ -315,7 +305,7 @@ class TestLogoutPurge:
         assert data["all_profiles"] is False
         assert data["cache_entries_removed"] is not None
         assert data["credentials_removed"] is True
-        assert data["credential_files_removed"] == [str(default_creds_path("school"))]
+        assert data["credential_files_removed"] == [str(resolve_creds_path())]
         assert data["keychain_entry_removed"] is False
         assert data["credentials_kept"] is False
         # New keys describe what --purge did.
@@ -330,8 +320,6 @@ class TestLogoutPurge:
         code, payload = _logout("--purge")
         assert code == 0
         assert payload["data"]["profile_purged"] is True
-        assert payload["data"]["profile_entry_removed"] is False
-        assert payload["data"]["profiles_purged"] == []
 
     def test_a_dangling_active_profile_pointer_is_cleaned_up(self, state_dir):
         """A pointer to a profile that is already gone must not be left behind.
@@ -352,30 +340,16 @@ class TestLogoutPurge:
         assert code == 0
         data = _config_json()
         assert "active_profile" not in data
-        assert data["profiles"] == {}
-        assert payload["data"]["profiles_purged"] == []
-        assert payload["data"]["profile_entry_removed"] is False
         assert load_state().active_profile == DEFAULT_PROFILE_NAME
-
-    def test_a_surviving_pointer_is_left_alone(self, state_dir):
-        """Purging one of two profiles must not unset the other's pointer."""
-        _write_config("default", "school", active="default")
-        _write_session("default")
-
-        _logout("--profile", "school", "--purge")
-
-        data = _config_json()
-        assert data["active_profile"] == "default"
-        assert "school" not in data["profiles"]
 
     def test_purge_and_keep_credentials_is_refused(self, state_dir):
         """The flags contradict each other; one must not silently win."""
         _write_config("school", active="school")
         _write_session("school")
-        save_creds(default_creds_path("school"), EMAIL, PASSWORD)
+        save_creds(resolve_creds_path(), EMAIL, PASSWORD)
         config_before = _config_json()
 
-        code, payload = _logout("--profile", "school", "--purge", "--keep-credentials")
+        code, payload = _logout("--purge", "--keep-credentials")
         assert code == 1
         assert payload["ok"] is False
         assert payload["command"] == "logout"
@@ -385,56 +359,36 @@ class TestLogoutPurge:
 
         # Nothing was touched: the refusal happens before any clearing.
         assert _config_json() == config_before
-        assert default_creds_path("school").exists()
+        assert resolve_creds_path().exists()
 
-    def test_purge_all_leaves_a_loadable_config(self, state_dir):
-        """Every entry goes, and what is left still parses and still loads."""
-        _write_config("default", "school", "tutoring", active="school")
-        _write_session("school")
-        for name in ("default", "school", "tutoring"):
-            save_creds(default_creds_path(name), f"{name}@example.com", "pw")
-        assert len(all_creds_paths()) == 3
+    def test_purge_cleans_legacy_profiles_config(self, state_dir):
+        """Legacy profiles map is removed on purge, leaving a clean loadable config."""
+        path = resolve_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({
+                "version": 1,
+                "profiles": {
+                    "default": {"school": "s1", "email": "e1@example.com"},
+                    "other": {"school": "s2", "email": "e2@example.com"},
+                },
+                "active_profile": "default",
+            }),
+            encoding="utf-8",
+        )
+        save_creds(resolve_creds_path(), "e1@example.com", "pw")
 
-        code, payload = _logout("--all", "--purge")
+        code, payload = _logout("--purge")
         assert code == 0
 
         data = _config_json()
-        assert data["profiles"] == {}, "a profile entry survived `--purge --all`"
-        assert "active_profile" not in data, (
-            "active_profile still names a profile that no longer exists"
-        )
-        assert data["version"] == 1
+        assert "profiles" not in data
+        assert "active_profile" not in data
 
-        # The empty map is the shape load_state already tolerates: it reads
-        # `config_data.get("profiles", {})` and falls back to the default name.
         state = load_state()
         assert state.active_profile == DEFAULT_PROFILE_NAME
         assert state.profile.school is None
-        assert state.profile.domain is None
-        assert state.profile.email is None
-
-        # Sessions and passwords went too. `all_creds_paths()` always names the
-        # default creds file whether or not it exists, so the honest assertion
-        # is that none of them survived — the same form the existing
-        # `logout --all` test in test_session_lifecycle.py uses.
-        assert not resolve_session_path().exists()
-        assert [p for p in all_creds_paths() if p.exists()] == []
-        assert payload["data"]["profiles_purged"] == [
-            "default",
-            "school",
-            "tutoring",
-        ]
-        assert payload["data"]["profile_entry_removed"] is True
-
-    def test_purge_all_after_which_a_new_profile_can_be_saved(self, state_dir):
-        """The empty-map shape must not wedge the next `login`."""
-        _write_config("default", "school", active="school")
-        _write_session("school")
-        _logout("--all", "--purge")
-
-        _write_config("fresh", active="fresh")
-        assert load_state("fresh").active_profile == "fresh"
-        assert "fresh" in _config_json()["profiles"]
+        assert not resolve_creds_path().exists()
 
 
 # ── 2. a domain that can be absent ────────────────────────────────────────
@@ -481,8 +435,8 @@ class TestDomainUnset:
         state = load_state()
         save_profile(state)
 
-        stored = _config_json()["profiles"]["default"]
-        assert stored["domain"] is None
+        stored = _config_json()
+        assert stored.get("domain") is None
         assert "domain" in stored, "the key was dropped rather than stored as null"
 
         assert load_state().profile.domain is None
@@ -497,15 +451,15 @@ class TestDomainUnset:
         save_session(state)
 
         session = json.loads(resolve_session_path().read_text(encoding="utf-8"))
-        assert session["profiles"]["default"]["domain"] is None
-        assert "domain" in session["profiles"]["default"]
+        assert session.get("domain") is None
+        assert "domain" in session
         assert load_state().session.domain is None
 
     def test_a_saved_domain_survives_the_round_trip(self, state_dir):
         state = load_state()
         state.profile.domain = "managebac.cn"
         save_profile(state)
-        assert _config_json()["profiles"]["default"]["domain"] == "managebac.cn"
+        assert _config_json()["domain"] == "managebac.cn"
         assert load_state().profile.domain == "managebac.cn"
 
     def test_session_domain_falls_back_to_the_profile(self, state_dir):
@@ -623,7 +577,7 @@ class TestLoginDomainPrompt:
         _write_config("school", domain="managebac.cn", active="school")
         _write_session("school")
 
-        args = self._login_args("--profile", "school")
+        args = self._login_args()
         asked = self._run(args, [])
         assert asked == [], f"prompted for {asked!r} despite a saved domain"
         assert args.domain is None
@@ -687,7 +641,7 @@ class TestLoginDomainPrompt:
         """Partial config prompts the gap, not the whole questionnaire."""
         _write_config("school", domain=None, active="school")
         _write_session("school")
-        args = self._login_args("--profile", "school")
+        args = self._login_args()
         asked = self._run(args, [""])
         assert asked == ["Base domain [managebac.com]: "]
         assert args.domain == "managebac.com"

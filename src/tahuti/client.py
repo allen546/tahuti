@@ -337,31 +337,6 @@ def task_id_from_target(target: str) -> str:
     )
 
 
-def _coerce_chart_points(raw: Any) -> list[float]:
-    """Flatten one Highcharts series' ``data`` into a list of floats.
-
-    ManageBac emits two shapes for the same chart:
-
-    * flat values — ``[4]``, ``[4, 5]``
-    * ``[timestamp, value]`` pairs — ``[[1700000000000, 4]]``
-
-    Unparseable points are skipped rather than raised: one odd series must not
-    take down the whole class, because ``crawl_all`` only logs a warning per
-    class and the class then silently disappears from the output.
-    """
-    points: list[float] = []
-    if not isinstance(raw, (list, tuple)):
-        return points
-    for point in raw:
-        # A pair carries the timestamp first and the score second.
-        value = point[-1] if isinstance(point, (list, tuple)) else point
-        try:
-            points.append(float(value))
-        except (TypeError, ValueError):
-            log.debug("skipping unparseable chart data point %r", point)
-            continue
-    return points
-
 
 # ManageBac answers a rejected upload with HTTP 200 and a human-readable
 # sentence, so a status-code check alone would call a failed submission a
@@ -2161,213 +2136,6 @@ class ManageBacClient:
                     seen[class_id] = name
         return seen
 
-    def get_class_grades(self, class_id: str, bypass_cache: bool = False) -> dict:
-        """Fetch all grades for a class and compute expected grade.
-
-        Returns ``{"tasks": [...], "categories": [...], "grade_scale": {...}, "expected_grade": ...}``.
-        """
-        soup = self._get(f"/student/classes/{class_id}/core_tasks", bypass_cache=bypass_cache)
-
-        # Grade scale
-        chart = soup.find("div", class_="assignments-progress-chart")
-        grade_scale: dict = {}
-        if chart:
-            raw_labels = chart.get("data-grade-labels", "{}")
-            try:
-                grade_scale = {int(k): v for k, v in json.loads(raw_labels).items()}
-            except Exception:
-                pass
-
-        # Category weights
-        categories: list[dict] = []
-        cat_table = soup.find("div", id="categories-table")
-        if cat_table:
-            for item in cat_table.find_all("div", class_="list-item"):
-                cells = item.find_all("div", class_="cell")
-                if len(cells) >= 2:
-                    cat_name = cells[0].get_text(strip=True)
-                    weight_str = cells[1].get_text(strip=True).rstrip("%")
-                    if cat_name.lower() in ("category", ""):
-                        continue  # skip header row
-                    try:
-                        weight = float(weight_str) / 100.0
-                    except ValueError:
-                        weight = 0.0
-                    categories.append({"name": cat_name, "weight": weight})
-
-        # Tasks with grades
-        tasks: list[dict] = []
-        for card in soup.find_all("div", class_="fusion-card-item"):
-            title_el = card.find(class_="title")
-            if not title_el:
-                continue
-            title = title_el.get_text(strip=True)
-            link_el = title_el.find("a")
-            href = link_el.get("href", "") if link_el else ""
-            task_id_match = re.search(r"/core_tasks/(\d+)", href)
-
-            # Grade
-            grade_letter = None
-            assessment_cell = card.find(class_=re.compile(r"assessment-cell|task-score")) or card
-            grade_el = assessment_cell.find(class_=re.compile(r"\bgrade\b"))
-            if grade_el:
-                grade_letter = grade_el.get_text(strip=True)
-            
-            if not grade_letter:
-                not_assessed_els = assessment_cell.find_all(class_=re.compile(r"not-assessed"))
-                for el in not_assessed_els:
-                    txt = el.get_text(strip=True)
-                    if txt:
-                        grade_letter = txt
-                        break
-
-            if not grade_letter:
-                not_applicable_el = assessment_cell.find(class_=re.compile(r"not-applicable"))
-                if not_applicable_el:
-                    grade_letter = not_applicable_el.get_text(strip=True)
-                else:
-                    na_el = assessment_cell.find(lambda tag: tag.name in {"div", "span"} and tag.get_text(strip=True) == "N/A")
-                    if na_el:
-                        grade_letter = "N/A"
-
-            if not grade_letter:
-                status_el = assessment_cell.find(class_=re.compile(r"\b(submitted|not-submitted)\b"))
-                if status_el:
-                    txt = status_el.get_text(strip=True)
-                    if txt and txt.lower() in ("complete", "incomplete"):
-                        grade_letter = txt
-
-            # Points
-            points_el = card.find("div", class_="points")
-            points_text = points_el.get_text(strip=True) if points_el else None
-
-            # Category and badge labels
-            labels: list[str] = []
-            labels_set = card.find("div", class_="labels-set")
-            if labels_set:
-                for lbl in labels_set.find_all("div", class_="label"):
-                    t = lbl.get_text(strip=True)
-                    if t:
-                        labels.append(t)
-                for badge in labels_set.find_all("span", class_="badge-label"):
-                    t = badge.get_text(strip=True)
-                    if t:
-                        labels.append(t)
-
-            # Two fields, deliberately.  `status` keeps the frozen version's own
-            # spelling (see `_card_status_text`), so the frozen classifier reads
-            # it exactly as it always did.  `submission_status` carries the
-            # canonical token read off the real signals — the green `Submitted`
-            # badge, the `cell not-submitted` span — so an approved rule has a
-            # trustworthy state to build on without moving a classification.
-            # Six tasks have no dropbox link and no badge at all; those stay
-            # None rather than being guessed into a state.
-            status = _card_status_text(card, labels)
-            submission_status = _card_submission_status(card, labels)
-
-            # Parse submit button
-            dropbox_link = card.find("a", href=re.compile(r"/core_tasks/\d+/dropbox"))
-            has_submit_btn = bool(
-                dropbox_link or card.find(lambda el: _is_submit_control(el))
-            )
-
-            # Parse due date
-            due_date = None
-            date_badge = card.find(class_="date-badge")
-            if date_badge:
-                m_el = date_badge.find(class_="month")
-                d_el = date_badge.find(class_="day")
-                if m_el and d_el:
-                    month = m_el.get_text(strip=True)
-                    day = d_el.get_text(strip=True)
-                    due_date_base = f"{month} {day}"
-
-                    due_el = card.find(class_="due-date")
-                    time_str = ""
-                    if due_el:
-                        due_text = due_el.get_text(" ", strip=True)
-                        time_match = re.search(r"(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))", due_text)
-                        if time_match:
-                            time_str = time_match.group(1)
-
-                    if time_str:
-                        due_date = f"{due_date_base}, {time_str}"
-                    else:
-                        due_date = due_date_base
-
-            tasks.append(
-                {
-                    "title": title,
-                    "task_id": task_id_match.group(1) if task_id_match else None,
-                    "url": f"{self.base}{href}" if href.startswith("/") else href,
-                    "due_date": due_date,
-                    "grade_letter": grade_letter,
-                    "points": points_text,
-                    "status": status,
-                    "submission_status": submission_status,
-                    "category": labels[0] if labels else None,
-                    "labels": labels or None,
-                    "has_submit_button": has_submit_btn,
-                }
-            )
-
-        # Compute expected grade from chart data
-        expected = self._compute_expected_grade(chart, grade_scale, categories)
-
-        return {
-            "tasks": tasks,
-            "categories": categories,
-            "grade_scale": grade_scale,
-            "expected_grade": expected,
-        }
-
-    def _compute_expected_grade(
-        self,
-        chart,
-        grade_scale: dict,
-        categories: list[dict],
-    ) -> dict | None:
-        """Compute weighted expected grade from the Highcharts data-series."""
-        if not chart or not grade_scale:
-            return None
-
-        raw_series = chart.get("data-series", "[]")
-        try:
-            series = json.loads(raw_series)
-        except Exception:
-            return None
-
-        if not series:
-            return None
-
-        # The chart uses a 0-11 numeric scale mapped to letter grades
-        # We need to figure out which category each task belongs to
-        # from the task list — but the chart only has names.
-        # Compute a simple unweighted average from the chart data.
-        scores: list[float] = []
-        if isinstance(series, list):
-            for item in series:
-                if not isinstance(item, dict):
-                    continue
-                points = _coerce_chart_points(item.get("data") or [])
-                if points:
-                    scores.append(points[0])
-
-        if not scores:
-            return None
-
-        avg_score = sum(scores) / len(scores)
-        # Clamp to scale range
-        idx = max(0, min(round(avg_score), max(grade_scale.keys())))
-        letter = grade_scale.get(idx, str(idx))
-
-        return {
-            "average_score": round(avg_score, 2),
-            "letter_grade": letter,
-            "num_graded": len(scores),
-            "note": "Unweighted average from chart data",
-        }
-
     # ── Public crawl methods ────────────────────────────────────────────
 
     def get_tasks_by_view(self, view: str, max_pages: int = 10) -> list[dict]:
@@ -2655,42 +2423,126 @@ class ManageBacClient:
         bypass_cache: bool = False,
     ) -> list[dict]:
         """Fetch and reconstruct all tasks for a specific class."""
-        class_data = self.get_class_grades(class_id, bypass_cache=bypass_cache)
+        soup = self._get(f"/student/classes/{class_id}/core_tasks", bypass_cache=bypass_cache)
         tasks: list[dict] = []
-        for t in class_data.get("tasks", []):
-            task_id = t.get("task_id")
+        for card in soup.find_all("div", class_="fusion-card-item"):
+            title_el = card.find(class_="title")
+            if not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            link_el = title_el.find("a")
+            href = link_el.get("href", "") if link_el else ""
+            task_id_match = re.search(r"/core_tasks/(\d+)", href)
+            task_id = task_id_match.group(1) if task_id_match else None
             if not task_id:
                 continue
 
-            labels = t.get("labels") or []
-            grade_letter = t.get("grade_letter")
-            due_date = t.get("due_date")
-            has_submit_btn = bool(t.get("has_submit_button", False))
-            is_submitted = is_task_submitted(t)
-            # Exact string test on the frozen `status` spelling — this is the §6
-            # gate, and it is deliberately the frozen version's test.  The grades
-            # page writes "Not Submitted" (space, not hyphen), so this arm fires
-            # only for the label-derived canonical token, never for the span text.
-            # Canonising it (as this branch briefly did) makes it fire for every
-            # card whose teacher closed the dropbox link, moving those from `past`
-            # to `overdue`.  The trustworthy reading of that state now lives in
-            # `submission_status`, which nothing here classifies on.
+            grade_letter = None
+            assessment_cell = card.find(class_=re.compile(r"assessment-cell|task-score")) or card
+            grade_el = assessment_cell.find(class_=re.compile(r"\bgrade\b"))
+            if grade_el:
+                grade_letter = grade_el.get_text(strip=True)
 
+            if not grade_letter:
+                not_assessed_els = assessment_cell.find_all(class_=re.compile(r"not-assessed"))
+                for el in not_assessed_els:
+                    txt = el.get_text(strip=True)
+                    if txt:
+                        grade_letter = txt
+                        break
+
+            if not grade_letter:
+                not_applicable_el = assessment_cell.find(class_=re.compile(r"not-applicable"))
+                if not_applicable_el:
+                    grade_letter = not_applicable_el.get_text(strip=True)
+                else:
+                    na_el = assessment_cell.find(lambda tag: tag.name in {"div", "span"} and tag.get_text(strip=True) == "N/A")
+                    if na_el:
+                        grade_letter = "N/A"
+
+            if not grade_letter:
+                status_el = assessment_cell.find(class_=re.compile(r"\b(submitted|not-submitted)\b"))
+                if status_el:
+                    txt = status_el.get_text(strip=True)
+                    if txt and txt.lower() in ("complete", "incomplete"):
+                        grade_letter = txt
+
+            points_el = card.find("div", class_="points")
+            points_text = points_el.get_text(strip=True) if points_el else None
+
+            labels: list[str] = []
+            labels_set = card.find("div", class_="labels-set")
+            if labels_set:
+                for lbl in labels_set.find_all("div", class_="label"):
+                    t = lbl.get_text(strip=True)
+                    if t:
+                        labels.append(t)
+                for badge in labels_set.find_all("span", class_="badge-label"):
+                    t = badge.get_text(strip=True)
+                    if t:
+                        labels.append(t)
+
+            status = _card_status_text(card, labels)
+            submission_status = _card_submission_status(card, labels)
+
+            dropbox_link = card.find("a", href=re.compile(r"/core_tasks/\d+/dropbox"))
+            has_submit_btn = bool(
+                dropbox_link or card.find(lambda el: _is_submit_control(el))
+            )
+
+            due_date = None
+            date_badge = card.find(class_="date-badge")
+            if date_badge:
+                m_el = date_badge.find(class_="month")
+                d_el = date_badge.find(class_="day")
+                if m_el and d_el:
+                    month = m_el.get_text(strip=True)
+                    day = d_el.get_text(strip=True)
+                    due_date_base = f"{month} {day}"
+
+                    due_el = card.find(class_="due-date")
+                    time_str = ""
+                    if due_el:
+                        due_text = due_el.get_text(" ", strip=True)
+                        time_match = re.search(r"(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm))", due_text)
+                        if time_match:
+                            time_str = time_match.group(1)
+
+                    if time_str:
+                        due_date = f"{due_date_base}, {time_str}"
+                    else:
+                        due_date = due_date_base
+
+            card_info = {
+                "title": title,
+                "task_id": task_id,
+                "url": f"{self.base}{href}" if href.startswith("/") else href,
+                "due_date": due_date,
+                "grade_letter": grade_letter,
+                "points": points_text,
+                "status": status,
+                "submission_status": submission_status,
+                "category": labels[0] if labels else None,
+                "labels": labels or None,
+                "has_submit_button": has_submit_btn,
+            }
+
+            is_submitted = is_task_submitted(card_info)
             if is_submitted:
                 task_status = "submitted"
-            elif has_submit_btn or t.get("status") == "not-submitted":
+            elif has_submit_btn or card_info.get("status") == "not-submitted":
                 task_status = "not-submitted"
             else:
-                task_status = t.get("status")
+                task_status = card_info.get("status")
 
             reconstructed_task = {
                 "id": task_id,
-                "title": t.get("title"),
+                "title": title,
                 "class_name": class_name or "",
                 "due_date": due_date,
-                "link": t.get("url"),
+                "link": card_info["url"],
                 "grade_letter": grade_letter,
-                "grade_score": t.get("points"),
+                "grade_score": points_text,
                 "labels": labels or None,
                 "status": task_status,
                 "has_submit_button": has_submit_btn,
