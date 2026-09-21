@@ -619,6 +619,98 @@ whether anyone needs it. Record the answer here when it is known.
 
 ---
 
+### 7.11 `download` is broken for every real attachment — **found live, fix in flight**
+
+This is the most consequential finding in the handoff, and it was found by probing the
+live account rather than a mock. It is recorded here in full because the fix is
+in flight and may land half-done.
+
+**The defect, measured live.** `tahuti download` fails on **5 of 5 attachments across
+4 tasks**, exit 1, `reason: refused_off_domain_host`. Separately, `tahuti view`
+**silently drops** attachments whose href is already an S3 URL — the task simply has
+no `attachments` key in its output.
+
+**There are two attachment styles, and each is broken differently.**
+
+| style | what the page contains | `view` | `download` |
+|---|---|---|---|
+| blob id | `/attachments/<base64>--<hmac>` on the school host, 302s to S3 | shows a short working URL | **fails** — the redirect hop is refused |
+| direct S3 | the full pre-signed `…s3…amazonaws.com.cn/uploads/…?X-Amz-…` URL in the HTML | **shows nothing** — dropped at extraction | nothing to fetch |
+
+The short blob-id link is genuinely usable: 246 characters, zero query parameters, and
+`curl -L` on it with no cookie returns the real file (verified: HTTP 200, 436,673
+bytes). So `tahuti view <id> --format json | jq -r '.data.detail.attachments[].url' |
+xargs -r curl -LO` works for that style today.
+
+**The host guard's justification is false.** The comment at `__main__.py:145-155`
+claims `requests` "merges the whole cookie jar into each hop," so a 302 off-domain
+would ship `_managebac_session` to a third party. Tested directly: the cookie went to
+the school host and was **not** sent to the S3 host. `http.cookiejar` respects domain
+scoping. A rogue URL is useless to an attacker precisely because it carries no
+credential — which is the owner's argument and it is correct.
+
+**The guard also leaks the credential it claims to protect.** `client.py:1266-1270`
+interpolates the whole href into a `log.warning`, so the live `X-Amz-Security-Token`
+and `X-Amz-Signature` land in the log and in `failed[].reason`
+(`__main__.py:2111-2115`, `:2076`). Diagnosing this bug *required* reading that log,
+which is how the exposure was found.
+
+**Provenance — none of this came from the recent work.** `_refuse_reason_for_url` and
+`_expected_download_host` are from `a9b8400` (2026-09-19), the estate message from
+`5e164c0` and `5fd68cb`, all on `main`, two to three days before the branch work
+started. Do not blame the divergence or efficiency commits for it.
+
+**There are three hardcoded domain assumptions, not one, and they fail differently:**
+
+| | where | on an unlisted ManageBac domain |
+|---|---|---|
+| `ALLOWED_DOMAINS` | `client.py:43` | hard rejection — the user cannot use the tool at all |
+| `HUB_ENDPOINTS` | `notifications.py:40-46` | **silent wrong answer** — the hub JWT goes to the `.com` hub |
+| `"managebac.com"` defaults | `auth.py:251`, `__main__.py:181`, `client.py:582` | harmless, just a prompt default |
+
+`HUB_ENDPOINTS` is the dangerous one because it is a lookup, not a check, so it does
+not look like the same problem — but `.get(domain, HUB_ENDPOINTS["managebac.com"])`
+means a `managebac.sg` user's hub credential quietly crosses continents. The README's
+claim to support "both international and China instances" is stated as if that were
+the complete set; nobody has verified it.
+
+**The design principle the owner set, which governs all of this:**
+
+> This is essentially an augmented browser, and we are not going to build a bunch of
+> unnecessary stuff on top of the browser.
+
+A browser has a cookie jar and goes where you point it. It has no host allowlist, no
+per-hop revalidation, no frozenset of permitted domains. Apply this lens before adding
+any future guard: if a browser with devtools would not need it, tahuti probably does
+not either.
+
+**Status of the fix — IN FLIGHT, possibly incomplete.**
+
+- Branch: `fix/remove-host-guard`
+- Worktree: `/private/tmp/guard-removal-58347` — **this is a temp directory and may be
+  cleaned by the OS.** The *commits* live in the git object store and survive the
+  worktree's deletion, but any **uncommitted** work there is at real risk. Check
+  `git log fix/remove-host-guard` before assuming anything is lost.
+- At the time of writing the branch has **no commits of its own** — it sits at
+  `283f25b`, the branch point. The host guard is still fully in place on the final
+  branch (`grep -c ALLOWED_DOMAINS src/tahuti/client.py` → 4).
+- Scope, in priority order: (1) `download` follows the redirect instead of refusing
+  it; (2) `view` shows the attachment URLs; (3) the credential echo is removed;
+  (4) `ALLOWED_DOMAINS` / `_assert_same_host` / `HUB_ENDPOINTS` — a late scope
+  extension that may be left undone.
+- The owner ruled that `_assert_same_host` goes entirely, on the grounds that the
+  login POST voluntarily hands the plaintext password to that host, so guarding a
+  *redirect* of it while trusting the host with it is a contradiction rather than a
+  threat model.
+
+**To finish it:** check the branch for commits, run the suite with
+`PYTHONPATH=$PWD/src` pointed at whatever tree you use, and verify against the live
+account with `tahuti view 27616701` (blob-id style) and `tahuti view 27575509`
+(direct-S3 style) — both must show an attachment URL, and `download` on both must
+exit 0 with `downloaded_count: 1`.
+
+---
+
 ## 8. How to pick this up
 
 1. **Read `docs/http-revalidation-findings.md`.** It is the intellectual core of
