@@ -264,6 +264,7 @@ tahuti --version                       # print the installed version and exit
 tahuti logout                             # forget this profile's session + password
 tahuti logout --all                       # every profile's, plus the legacy file
 tahuti logout --keep-credentials          # keep the saved password
+tahuti logout --purge                     # ...and forget the profile's school/domain/email
 
 # Tasks & Coursework
 tahuti list                             # list upcoming tasks
@@ -403,6 +404,15 @@ permissions are the only barrier protecting a cleartext password. Set
 > entry, as well as clearing the session cookie and the response cache. Pass
 > `logout --keep-credentials` if you want silent re-login preserved instead;
 > `logout --all` clears every profile's file and the legacy global one.
+>
+> None of those touch the profile itself: the school, domain, email and
+> `defaults` in `config.json` survive a logout, so the next command still knows
+> which school to talk to. `tahuti logout --purge` removes that entry too —
+> wholesale — and `logout --all --purge` removes every profile's, leaving
+> `config.json` with an empty `profiles` map and no `active_profile` (a later
+> command then uses the default profile name unless you pass `--profile`).
+> `--purge` implies the credential deletion, so combining it with
+> `--keep-credentials` is refused rather than silently doing one or the other.
 >
 > To keep the password out of the cleartext file entirely, combine `--keep-credentials`
 > with the OS keychain:
