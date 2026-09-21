@@ -1,8 +1,9 @@
 # Handoff: tahuti
 
-Written 2026-09-21. This is for someone who has never opened this repository
-before. It explains what the project is, what was wrong with it, what got fixed,
-what was deliberately left alone, and where everything physically lives on disk.
+Written 2026-09-21, updated the same day after the `logout` work landed. This is
+for someone who has never opened this repository before. It explains what the
+project is, what was wrong with it, what got fixed, what was deliberately left
+alone, and where everything physically lives on disk.
 
 If you read only one section, read **§7 Still open**.
 
@@ -71,6 +72,7 @@ object store, so you can have several branches checked out at once without
 | `/Users/allen/Desktop/t8/mb-crawler` | `fix/mcp-divergences-efficiency` | divergence work, 1596 tests pass — superseded |
 | `/Users/allen/Desktop/t8/mb-crawler-wt-handoff` | `fix/mcp-cli-parity-and-efficiency` | **the final branch** — all efficiency work merged, **1605 tests pass**, and where this document lives |
 | `/Users/allen/Desktop/t8/mb-crawler-wt-submit-local` | `fix/efficiency-submit-local` | merged into the final branch; worktree left behind |
+| `/Users/allen/Desktop/t8/mb-crawler/.claude/worktrees/logout-purge-domain-unset` | `fix/logout-purge-domain-unset` | merged into the final branch; worktree left behind |
 | `/Users/allen/Desktop/t8/mb-crawler/.claude/worktrees/auth-head-simplify` | `fix/auth-head-simplify` | merged |
 | `/Users/allen/Desktop/t8/mb-crawler/.claude/worktrees/cache-per-entry-ttl` | `fix/cache-per-entry-ttl` | merged |
 | `/Users/allen/Desktop/t8/mb-crawler/.claude/worktrees/dead-config-and-paths` | `fix/dead-config-and-paths` | merged |
@@ -92,8 +94,9 @@ These exist only as refs; check one out in the main checkout or make a worktree:
 | Branch | State |
 |---|---|
 | `main` | released 0.4.3, 34 h old |
-| `fix/mcp-cli-parity-and-efficiency` | **the final branch** — everything below, merged, 1605 tests pass |
+| `fix/mcp-cli-parity-and-efficiency` | **the final branch** — everything below, merged, **1638 tests pass** |
 | `fix/mcp-divergences-efficiency` | the divergence work on its own, 1596 tests pass — an ancestor of the final branch |
+| `fix/logout-purge-domain-unset` | the `logout --purge` / domain-unset work, merged into the final branch |
 | `fix/mcp-cli-divergences` | merged, ancestor of `fix/mcp-divergences-efficiency` |
 | `fix/roster-single-source` | merged, ancestor of `fix/mcp-divergences-efficiency` |
 | `trial5` | **scratch, from a merge experiment. Safe to delete.** |
@@ -194,6 +197,21 @@ on purpose at the time and is now closed by `fix/roster-single-source` (below).
   closes the `grades`/`count-grade-freq` asymmetry from §3.1 — but note it
   **changes output**: a class with no tasks now appears in `grades` where it
   previously did not.
+
+### 3.4 `logout` left the school on disk, and the domain was always asked for
+
+`cmd_logout` cleared the session, the cache and the credential files, but never
+the school and domain — which live in `config.json` under `profiles.<name>`. So a
+logout left the account's identity on disk. And `_prompt_login_setup` asked for
+the base domain on every interactive `login`, because `ProfileConfig.domain` and
+`SessionConfig.domain` both defaulted to `"managebac.com"`, so a domain was never
+absent and an "only if unknown" rule would have silently skipped the one choice
+worth putting on screen. That defence was the bug: "unset" was not
+representable.
+
+Fixed by adding `logout --purge` (which deletes the whole profile entry) and by
+making both domain fields default to `None`. Full detail, the verified scope
+ladder, and two out-of-scope defects found along the way are in **§7.9**.
 
 ### 3.3 Test hygiene
 
@@ -472,35 +490,40 @@ actually holds, every parallelisation proposal is unsafe to evaluate.
   wrote beside the repo instead of into a tmpdir. Untracked and safe to delete.
 - **`trial5` is a scratch branch** from a merge experiment. Safe to delete.
 
-### 7.8 The local session is currently broken
+### 7.8 The local session is currently absent
 
-`~/.config/tahuti/session.json` is fresh (written 07:33 on 2026-09-21) but its
-school is `myschool` — a documentation placeholder, not a real subdomain.
-`tahuti list`, `tahuti notifications` and `tahuti grades` all exit 1 with a 404
-on `/student/dashboard` itself. Either a test wrote a fixture session into the
-real config directory, or `myschool` was typed at the login prompt.
+`~/.config/tahuti/` now contains only `config.json` (mtime 07:34 on 2026-09-21)
+and `cache/`. **There is no `session.json` and no `creds*.json` at all.**
+
+Earlier the same day the directory held a `session.json` whose school was
+`myschool` — a documentation placeholder, not a real subdomain — so
+`tahuti list`, `notifications` and `grades` all exited 1 with a 404 on
+`/student/dashboard` itself. That file is now gone, so the stale-fixture problem
+is resolved by deletion rather than by a fix.
 
 **Nothing was purged.** The remedy used previously is to delete both
 `~/.config/tahuti/` and the pre-rename `~/.config/mb-crawler/`, then log in
-fresh with the real school subdomain.
+fresh with the real school subdomain. Until a real session exists, nothing can
+be verified against a live server and every claim stays fixture-based.
 
-### 7.9 `logout` does not remove school data — **being fixed now**
+### 7.9 `logout` did not remove school data — **fixed, landed**
 
-`cmd_logout` clears the session, the response cache and the credential files. It
-never touches the **school and domain**, which live in `config.json` under
+`cmd_logout` cleared the session, the response cache and the credential files. It
+never touched the **school and domain**, which live in `config.json` under
 `profiles.<name>` (written by `save_profile`). So after a logout the machine
-still remembers which school the profile belongs to — the user asked to be
-logged out and the account's identity is still on disk.
+still remembered which school the profile belonged to — the user asked to be
+logged out and the account's identity was still on disk.
 
-A second, related annoyance: `_prompt_login_setup` asks for the base domain on
-**every** interactive `login`, even when the profile already has one. Its own
-comment defends this on the grounds that `ProfileConfig.domain` and
-`SessionConfig.domain` both default to `"managebac.com"`, so a domain is never
+A second, related annoyance: `_prompt_login_setup` asked for the base domain on
+**every** interactive `login`, even when the profile already had one. Its own
+comment defended this on the grounds that `ProfileConfig.domain` and
+`SessionConfig.domain` both default to `"managebac.com"`, so a domain was never
 absent and an "only if unknown" rule would silently skip the one choice worth
-putting on screen. That defence *is* the bug: the fix is to make "unset"
+putting on screen. That defence *was* the bug: the fix was to make "unset"
 representable.
 
-The agreed scope ladder (confirmed with the user 2026-09-21):
+Both are fixed on branch `fix/logout-purge-domain-unset`, commit `6e8dd90`, and
+merged into the final branch. The scope ladder as built and verified:
 
 ```
 logout                    -> session + cache + password/keychain
@@ -508,31 +531,57 @@ logout --keep-credentials -> session + cache
 logout --purge            -> session + cache + password/keychain + whole profile entry
 ```
 
-- All three forms clear the **session** as a base.
-- The **response cache** stays controlled by the existing `--keep-cache` flag in
-  all three forms.
-- `--purge` deletes `profiles.<name>` **wholesale** — school, domain, email, and
-  the whole `defaults` block (view/pages/subject/details/format/cache_ttl). The
-  profile ceases to exist; a later command must re-supply `--profile` or fall
-  back to the default profile name.
-- `--purge` with `--keep-credentials` is contradictory and must be refused
-  rather than silently resolving to one or the other.
+Verified behaviourally on the final branch, on both the `default` and a named
+profile, by seeding a real config and reading the files back after each form:
 
-For the domain: `ProfileConfig.domain` and `SessionConfig.domain` become `None`
-by default, `config.py:337` stops substituting `"managebac.com"`, and the prompt
-switches to the same "only if unknown" rule the school and email fields already
-use. `auth.py:243`
-(`domain = domain or state.profile.domain or state.session.domain or "managebac.com"`)
-is already the correct single home for the default and should not change
-behaviour. The trap is `__main__.py:1118`, which does
-`extra_args.extend(["--domain", args.domain])` and would emit a literal
-`--domain None` once the default is `None`.
+| | profile entry | own creds file | session |
+|---|---|---|---|
+| `logout` | kept | **gone** | gone |
+| `--keep-credentials` | kept | kept | gone |
+| `--purge` | **gone** | gone | gone |
+| `--purge --keep-credentials` | kept | kept | kept — **refused, exit 1, nothing touched** |
 
-**This work was delegated to a subagent in its own worktree and had not landed at
-the time of writing.** It is not in the final branch. Check for a
-`fix/logout-*` branch before assuming it is missing, and merge it before the code
-review in §8, since it touches `__main__.py`, `config.py` and `auth.py` — all of
-which the review will look at.
+Two judgment calls the implementer made, both checked:
+
+- **`--purge` deletes `profiles.<name>` wholesale** — school, domain, email, and
+  the whole `defaults` block. `--purge --all` therefore leaves
+  `{"profiles": {}, "version": 1}` rather than deleting the map, because
+  `save_profile`'s `setdefault` needs something to write into. `active_profile`
+  is dropped, `load_state` resolves to `"default"` with every field `None`, and a
+  subsequent `save_profile` + reload round-trips correctly. The alternative —
+  deleting the map — was not taken because it would have made the config
+  unwritable.
+- **`--purge --keep-credentials` is refused** with `conflicting_flags`, raised
+  before `load_state` runs, so nothing is half-cleared.
+
+For the domain: `ProfileConfig.domain` and `SessionConfig.domain` now default to
+`None`, `load_state` reads the key without substituting `"managebac.com"`, and
+the prompt uses the same "only if unknown" rule the school and email fields
+already use. `auth.py:243` is the single home for the `"managebac.com"` fallback.
+Verified: a domain set to either value is never asked for; an absent key and an
+explicit `null` both prompt and default to `managebac.com`.
+
+Three payload keys were added and none of the six existing ones changed meaning:
+`profile_purged` (policy — was the flag given), `profile_entry_removed` (outcome
+— did an entry actually go), and `profiles_purged` (the names; under `--all` the
+only way to tell which profiles existed).
+
+**Two out-of-scope defects found while doing this, not fixed:**
+
+1. **`load_state` crashes on a malformed `profiles` value.**
+   `config.py:340` is `config_data.get("profiles", {}).get(active_profile, {})`.
+   If `profiles` is a list or a string, that raises
+   `AttributeError: 'list' object has no attribute 'get'` — and `cmd_logout`
+   calls `load_state` before reaching any of the purge logic, so
+   `logout --purge` cannot clean up such a config. A test asserting the purge
+   survives this was written, failed, and was deleted rather than shipped as
+   documentation of a bug. The `isinstance(profiles, dict)` guard inside
+   `purge_profiles` is therefore only reachable by library callers.
+2. **`client.py:582` carries a second `domain: str = "managebac.com"` default**
+   on `ManageBacClient.__init__`, and `tests/test_client.py:67` asserts on it.
+   Harmless — `build_client` always passes an explicitly resolved value — but it
+   is a second spelling of the default, so the claim that `auth.py:243` is its
+   single home is not literally true.
 
 ---
 
@@ -540,18 +589,20 @@ which the review will look at.
 
 1. **Read `docs/http-revalidation-findings.md`.** It is the intellectual core of
    the recent work and explains why the caching layer looks the way it does.
-2. **Get a working session** (§7.8). Without it nothing can be verified against a
-   live server, and every fixture-based claim stays fixture-based.
-3. **Check out the final branch:**
+2. **Check out the final branch:**
    ```bash
    cd /Users/allen/Desktop/t8/mb-crawler-wt-handoff   # already on it
    git checkout fix/mcp-cli-parity-and-efficiency
    ```
-4. **Land the `logout` / domain work** (§7.9). It was delegated to a subagent and
-   is not in the final branch yet. It touches `__main__.py`, `config.py` and
-   `auth.py`, so merge it *before* the review.
-5. **Settle §7.1 and §7.2.** Both are one small change each; both currently ship
+   It holds the divergence fixes, all three efficiency branches, and the
+   `logout`/domain work, at **1638 tests pass**.
+3. **Get a working session** (§7.8). Without it nothing can be verified against a
+   live server, and every fixture-based claim stays fixture-based.
+4. **Settle §7.1 and §7.2.** Both are one small change each; both currently ship
    with a behaviour change that nothing documents.
+5. **Fix the two out-of-scope defects in §7.9** if you want `logout --purge` to
+   work on a malformed config, and the `"managebac.com"` default to have exactly
+   one spelling.
 6. **Run the code review for inelegant code** on the final merged branch — PEP8,
    elegance traded for negligible performance, duplication at the wrong altitude.
    That round was planned and has not happened.
@@ -568,7 +619,9 @@ which the review will look at.
 | `+ fix/efficiency-notifications` | 1600 |
 | `+ fix/efficiency-delete-soups` | 1596 |
 | `+ fix/efficiency-submit-local` | 1601 |
-| **`fix/mcp-cli-parity-and-efficiency`** (all three merged) | **1605 passed**, 1 xfailed, 1 xpassed |
+| `fix/mcp-cli-parity-and-efficiency`, three efficiency branches merged | **1605 passed**, 1 xfailed, 1 xpassed |
+| `fix/logout-purge-domain-unset` on its own | 1629 |
+| **`fix/mcp-cli-parity-and-efficiency`, final** | **1638 passed**, 1 xfailed, 1 xpassed |
 
 All counts from `pytest -q` with `PYTHONPATH=$PWD/src` set to the worktree under
 test, and `tahuti.__file__` asserted to resolve inside it.
