@@ -28,7 +28,6 @@ from tahuti.__main__ import (
     EXIT_INTERRUPTED,
     EXIT_NOT_RUNNING,
     EXIT_OK,
-    cmd_download,
     cmd_view,
     main,
 )
@@ -295,60 +294,6 @@ def test_view_still_reads_a_bare_id_and_a_task_url(capsys):
         client.get_task_detail.assert_called_once_with(
             task_url, from_hint=False, bypass_cache=False
         )
-
-
-class _DownloadArgs:
-    def __init__(self, tmp_path, **overrides):
-        self.task_id = "123"
-        self.output_dir = str(tmp_path / "out")
-        self.no_submissions = False
-        self.no_attachments = False
-        self.pages = 10
-        self.output = None
-        self.format = "json"
-        for key, value in overrides.items():
-            setattr(self, key, value)
-
-
-def _run_download(tmp_path, detail_return):
-    """Invoke `cmd_download` against a snapshot-resolved task."""
-    client = MagicMock()
-    client.get_task_detail.return_value = detail_return
-    state = MagicMock()
-    snapshot_path = tmp_path / "snapshot.json"
-    snapshot_path.write_text(
-        json.dumps(
-            {
-                "upcoming": [{"id": "123", "title": "Task", "link": "http://x/123"}],
-                "past": [],
-                "overdue": [],
-            }
-        )
-    )
-    with (
-        patch("tahuti.__main__._build_client", return_value=(state, client, "a@b.com")),
-        patch("tahuti.__main__._authenticate_client"),
-        patch("tahuti.__main__.load_snapshot", return_value=json.loads(snapshot_path.read_text())),
-    ):
-        return cmd_download(_DownloadArgs(tmp_path))
-
-
-def test_download_detail_fetch_error_dict_exits_nonzero(capsys, tmp_path):
-    rc = _run_download(tmp_path, {"error": "Session expired or invalid"})
-
-    assert rc == EXIT_FAILURE
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is False
-    assert payload["command"] == "download"
-    assert payload["error"]["code"] == "detail_fetch_failed"
-
-
-def test_download_detail_fetch_none_still_exits_nonzero(capsys, tmp_path):
-    """The pre-existing falsy guard must keep working after extending it."""
-    rc = _run_download(tmp_path, None)
-
-    assert rc == EXIT_FAILURE
-    assert json.loads(capsys.readouterr().out)["error"]["code"] == "detail_fetch_failed"
 
 
 # ── `mb grades` (all-classes aggregate) ───────────────────────────────────

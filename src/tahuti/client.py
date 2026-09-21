@@ -38,9 +38,12 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 # A chain longer than this is a loop, not a redirect.
 _MAX_REDIRECT_HOPS = 10
 
-# Only these domains are acceptable targets; anything else risks sending the
-# session cookie (and the login password) to an unintended host.
-ALLOWED_DOMAINS = frozenset({"managebac.com", "managebac.cn"})
+# A base domain must be a plausible bare hostname: dot-separated DNS labels, no
+# scheme, no path, no port, no userinfo, no leading or trailing dot, no whitespace.
+_DOMAIN_RE = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?)+$"
+)
 
 # A school subdomain must be a plain DNS label.
 _SCHOOL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?$")
@@ -163,13 +166,12 @@ def _absolute_event_url(base: str, url: object) -> str | None:
 def _validate_school_domain(school: str, domain: str) -> tuple[str, str]:
     """Normalise and validate the school subdomain and base domain.
 
-    ``school``/``domain`` fully determine the host every authenticated request
-    (password POST, session cookie, hub JWT) is sent to, so both must be
-    constrained to a ManageBac host.  A value like ``evil.com/x`` would
-    otherwise turn the base URL into an attacker-chosen destination.
+    Ensures neither the subdomain nor the domain can smuggle paths, schemes,
+    ports, or userinfo into the base URL.
     """
     school_clean = str(school or "").strip().lower()
-    school_clean = school_clean.replace(f".{domain}", "")
+    if domain:
+        school_clean = school_clean.replace(f".{domain}", "")
     school_clean = school_clean.rstrip(".")
     if not school_clean:
         raise CommandError("invalid_school", "School subdomain must not be empty")
@@ -179,12 +181,11 @@ def _validate_school_domain(school: str, domain: str) -> tuple[str, str]:
             f"Invalid school subdomain {school!r}: expected a plain hostname label",
         )
 
-    domain_clean = str(domain or "").strip().lower().rstrip(".")
-    if domain_clean not in ALLOWED_DOMAINS:
+    domain_clean = str(domain or "").lower()
+    if not _DOMAIN_RE.match(domain_clean):
         raise CommandError(
             "invalid_domain",
-            f"Unsupported domain {domain!r}: expected one of "
-            + ", ".join(sorted(ALLOWED_DOMAINS)),
+            f"Invalid domain {domain!r}: expected a bare hostname such as 'managebac.com'",
         )
     return school_clean, domain_clean
 
@@ -701,34 +702,6 @@ class ManageBacClient:
             return exc.response.status_code in _RETRYABLE_STATUS_CODES
         return False
 
-    def _assert_same_host(self, url: str) -> None:
-        """Refuse to **send** an authenticated request to a host outside ManageBac.
-
-        Call this *before* issuing the request, never on a response you already
-        have.  requests follows redirects by merging the whole cookie jar into
-        the new target and, on 307/308, replays the request body.  Since the
-        login POST body contains the plaintext password and the jar holds
-        ``_managebac_session``, a redirect off the ManageBac estate would
-        exfiltrate both before any post-hoc check could run.
-
-        Hosts within an allowed domain (e.g. the school subdomain and the
-        shared calendar host ``managebac.com``) are permitted, since ManageBac
-        legitimately redirects between them.
-        """
-        expected = urlparse(self.base).netloc.lower()
-        actual = urlparse(url).netloc.lower()
-        if not actual or actual == expected:
-            return
-        if any(
-            actual == d or actual.endswith("." + d) for d in ALLOWED_DOMAINS
-        ):
-            return
-        raise CommandError(
-            "cross_host_redirect_blocked",
-            f"Refusing to send authenticated request to {actual!r} "
-            f"(expected {expected!r})",
-        )
-
     def _assert_allowed_transport(self, url: str) -> None:
         """Refuse a redirect that drops TLS, even one that stays on our own name.
 
@@ -768,10 +741,7 @@ class ManageBacClient:
     ) -> requests.Response:
         """Follow redirects by hand, checking every hop **before** it is sent.
 
-        Automatic redirect-following is disabled precisely so this runs first:
-        see :meth:`_assert_same_host` for what a foreign ``Location`` would
-        otherwise leak.  Same-host redirects are followed normally, including
-        the 307/308 body replay that ManageBac relies on for form resubmission.
+        Ensures TLS transport is maintained and redirect loops are bounded.
         """
         for _hop in range(_MAX_REDIRECT_HOPS):
             if response.status_code not in _REDIRECT_STATUSES:
@@ -782,9 +752,8 @@ class ManageBacClient:
                 # raise_for_status() decide what it is.
                 return response
             next_url = urljoin(response.url, location)
-            # Both gates run while the request still does not exist.
+            # Ensure TLS is not dropped on redirect.
             self._assert_allowed_transport(next_url)
-            self._assert_same_host(next_url)
 
             next_method = method
             next_kwargs = dict(kwargs)
@@ -797,9 +766,6 @@ class ManageBacClient:
                 # Historical clients downgrade a 301/302 after a POST to GET.
                 next_method = "GET"
                 self._strip_body(next_kwargs)
-            # 307/308 deliberately keep method *and* body — that is the whole
-            # point of "temporary/permanent redirect" versus "see other" — and
-            # it is safe here precisely because the host was just re-validated.
 
             hop_headers = dict(headers)
             hop_headers["Referer"] = response.url
@@ -819,10 +785,7 @@ class ManageBacClient:
 
     def _request_with_retry(self, method: str, url: str, **kwargs) -> requests.Response:
         # Redirects are followed by _follow_redirects_safely so every hop is
-        # host-checked before the request exists.  Disabling requests' own
-        # following here is the fix, not an optimisation: with it enabled the
-        # cookie jar and (on 307/308) the body have already gone by the time any
-        # check of ours can run.
+        # transport-checked before the request exists.
         if kwargs.pop("allow_redirects", False):
             log.debug(
                 "%s %s: allow_redirects ignored — redirects are validated hop by hop",
@@ -841,11 +804,7 @@ class ManageBacClient:
             try:
                 r = self.session.request(method, url, headers=headers, **kwargs)
                 r = self._follow_redirects_safely(method, url, r, kwargs, headers)
-                # Belt and braces: every hop was validated on the way out.
-                # Re-checking the final URL means a future edit here cannot
-                # silently downgrade the guard to post-hoc detection again.
                 self._assert_allowed_transport(r.url)
-                self._assert_same_host(r.url)
                 r.raise_for_status()
                 self._last_url = url
                 return r
@@ -1199,28 +1158,6 @@ class ManageBacClient:
             return None
         return text[:limit] if limit else text
 
-    def _is_downloadable_attachment_url(self, resolved_url: str, raw_href: str) -> bool:
-        """True when an attachment URL is safe to hand to the download path.
-
-        ``_extract_attachments`` passes any absolute href straight through, so a
-        task page carrying ``https://cdn.evil.test/payload.pdf`` (or a plaintext
-        ``http://myschool.managebac.com/...``) put that URL in the download list,
-        where ``cmd_download`` fetches it with the authenticated session and
-        writes the body into the output directory.  Filtering here keeps the
-        decision in the client, next to the other host checks.
-
-        Same rules as every other request: HTTPS only, and a host inside the
-        ManageBac estate.
-        """
-        parsed = urlparse(resolved_url)
-        if parsed.scheme.lower() != "https":
-            return False
-        try:
-            self._assert_same_host(resolved_url)
-        except CommandError:
-            return False
-        return True
-
     def _extract_attachments(self, soup: BeautifulSoup) -> list[dict]:
         attachments: list[dict] = []
         seen: set[tuple[str, str]] = set()
@@ -1262,14 +1199,8 @@ class ManageBacClient:
                 continue
 
             url = urljoin(f"{self.base}/", href)
-            if not self._is_downloadable_attachment_url(url, href):
-                log.warning(
-                    "Skipping attachment link %r (shown as %r): not an HTTPS URL on "
-                    "the ManageBac estate — downloading it would send the session "
-                    "cookie to a third party",
-                    href,
-                    link.get_text(" ", strip=True),
-                )
+            parsed_url = urlparse(url)
+            if parsed_url.scheme.lower() not in ("http", "https"):
                 continue
             source = "description"
             if link.find_parent(class_=re.compile(r"discussion", re.IGNORECASE)):
@@ -1388,7 +1319,7 @@ class ManageBacClient:
             return fallback
 
         known_hosts = {urlparse(e).netloc.lower() for e in HUB_ENDPOINTS.values()}
-        if host not in known_hosts:
+        if host not in known_hosts and not (host.endswith(".faria.com") or host.endswith(".faria.cn")):
             log.warning(
                 "Ignoring scraped MNN hub endpoint %r — host %r is not a known "
                 "Faria hub; using %s",

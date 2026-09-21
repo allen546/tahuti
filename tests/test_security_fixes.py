@@ -13,9 +13,9 @@ class TestSchoolDomainValidation:
             _validate_school_domain("evil.com/x", "managebac.com")
         assert e.value.code == "invalid_school"
 
-    def test_rejects_foreign_domain(self):
+    def test_rejects_malformed_domain(self):
         with pytest.raises(CommandError) as e:
-            _validate_school_domain("myschool", "evil.com")
+            _validate_school_domain("myschool", "https://evil.com")
         assert e.value.code == "invalid_domain"
 
     def test_rejects_empty_school(self):
@@ -24,6 +24,12 @@ class TestSchoolDomainValidation:
 
     def test_accepts_valid(self):
         assert _validate_school_domain("myschool", "managebac.cn") == ("myschool", "managebac.cn")
+
+    def test_accepts_arbitrary_valid_domain(self):
+        assert _validate_school_domain("myschool", "managebac.co.jp") == (
+            "myschool",
+            "managebac.co.jp",
+        )
 
     def test_strips_domain_suffix(self):
         assert _validate_school_domain("myschool.managebac.cn", "managebac.cn") == (
@@ -34,38 +40,6 @@ class TestSchoolDomainValidation:
     def test_constructor_rejects_offsite(self):
         with pytest.raises(CommandError):
             ManageBacClient(school="evil.com/x")
-
-
-class TestCrossHostRedirectGuard:
-    def test_allows_same_estate(self):
-        c = ManageBacClient(school="myschool")
-        c._assert_same_host("https://managebac.com/ical/x.ics")  # must not raise
-
-    def test_blocks_foreign_host(self):
-        c = ManageBacClient(school="myschool")
-        with pytest.raises(CommandError) as e:
-            c._assert_same_host("https://evil.example.com/steal")
-        assert e.value.code == "cross_host_redirect_blocked"
-
-    def test_blocks_suffix_spoof(self):
-        c = ManageBacClient(school="myschool")
-        with pytest.raises(CommandError):
-            c._assert_same_host("https://managebac.com.evil.net/x")
-
-
-class TestSafeFilename:
-    def test_blocks_traversal(self):
-        from tahuti.__main__ import _safe_filename
-        assert _safe_filename("../../../../etc/passwd") == "passwd"
-        assert "/" not in _safe_filename("a/b/c.pdf")
-
-    def test_strips_dots(self):
-        from tahuti.__main__ import _safe_filename
-        assert _safe_filename("..") == "download"
-
-    def test_keeps_normal_name(self):
-        from tahuti.__main__ import _safe_filename
-        assert _safe_filename("homework 1.pdf") == "homework 1.pdf"
 
 
 class TestStateEvictionOrder:

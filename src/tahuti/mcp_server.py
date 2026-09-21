@@ -485,9 +485,7 @@ def submit_file(
         verify_tls: Set to False to disable TLS certificate verification
         retry: Max retries with exponential backoff (default 3, 0=off)
     """
-    # The CLI's _safe_filename containment (__main__.py) guards *downloads*;
-    # nothing checked the upload path, so a confused tool call could name a
-    # directory, /dev/null, or a typo'd path and only fail inside the upload.
+    # Ensure the upload path names an existing, readable regular file.
     try:
         safe_path = _require_readable_file(file_path)
     except InvalidToolInput as exc:

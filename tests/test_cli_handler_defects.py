@@ -40,7 +40,6 @@ from tahuti.__main__ import (
     build_parser,
     cmd_daemon_configure_channel,
     cmd_daemon_start,
-    cmd_download,
     cmd_list,
     cmd_logout,
     main,
@@ -205,63 +204,6 @@ class _LogoutArgs:
         self.format = "json"
         for key, value in overrides.items():
             setattr(self, key, value)
-
-
-class _DownloadArgs:
-    def __init__(self, **overrides):
-        self.task_id = "1000099"
-        self.output_dir = None
-        self.no_submissions = False
-        self.no_attachments = False
-        self.pages = 10
-        self.output = None
-        self.format = "json"
-        for key, value in overrides.items():
-            setattr(self, key, value)
-
-
-def _download_client(attachments, detail=None):
-    client = MagicMock()
-    client.base = DOWNLOAD_HOST
-    client.school = "myschool"
-    client.domain = "managebac.cn"
-    client.get_task_detail.return_value = (
-        detail if detail is not None else {"attachments": attachments}
-    )
-    client.find_task_by_id.return_value = None
-    resp = MagicMock()
-    resp.iter_content.return_value = [b"bytes-"]
-    # `cmd_download` inspects the response before entering it, so it can read the
-    # status and Location of each redirect hop itself. These must be real
-    # booleans — a MagicMock is truthy and reads as "this is a redirect".
-    resp.is_redirect = False
-    resp.is_permanent_redirect = False
-    resp.status_code = 200
-    client.session.get.return_value = resp
-    return client
-
-
-def _run_download(tmp_path, args, client, snapshot_tasks):
-    """Invoke cmd_download with a mocked client and a real snapshot on disk."""
-    state = MagicMock()
-    state.active_profile = "default"
-    state.config_path = tmp_path / "config" / "config.json"
-    snapshot_path = _snapshot_path(state)
-    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-    snapshot_path.write_text(
-        json.dumps({"upcoming": snapshot_tasks, "past": [], "overdue": []})
-    )
-    captured, capture = _capture_payload()
-    with (
-        patch(
-            "tahuti.__main__._build_client",
-            return_value=(state, client, "student@example.com"),
-        ),
-        patch("tahuti.__main__._authenticate_client"),
-        patch("tahuti.__main__.print_payload", side_effect=capture),
-    ):
-        rc = cmd_download(args)
-    return rc, captured
 
 
 def _task(link=f"{DOWNLOAD_HOST}/student/classes/1/core_tasks/1000099"):
@@ -588,43 +530,21 @@ class TestLogoutClearsTheRightAccount:
         assert not creds.exists()
 
 
-# ── Defect 5 — `download` reported success on a failed detail fetch ─────
+# ── Defect 5 — `view` reported success on a failed detail fetch ──────────
 
 
-class TestDownloadDetailFailure:
-    def test_error_shaped_detail_is_not_a_success(self, tmp_path, capsys):
-        """`get_task_detail` returns {"error": ...}, which is truthy."""
-        client = _download_client(
-            [], detail={"error": "401 Client Error: Unauthorized"}
-        )
-        args = _DownloadArgs(output_dir=str(tmp_path / "out"))
-        rc, captured = _run_download(tmp_path, args, client, [_task()])
-
-        assert rc == 1
-        payload = captured["payload"]
-        assert payload["ok"] is False
-        assert payload["error"]["code"] == "detail_fetch_failed"
-        assert "401" in payload["error"]["message"]
-
-    def test_genuinely_empty_attachments_still_succeed(self, tmp_path):
-        """Control: "no files" must stay distinguishable from "fetch failed"."""
-        client = _download_client([], detail={"attachments": []})
-        args = _DownloadArgs(output_dir=str(tmp_path / "out"))
-        rc, captured = _run_download(tmp_path, args, client, [_task()])
-
-        assert rc == 0
-        assert captured["payload"]["ok"] is True
-        assert captured["payload"]["data"]["downloaded_count"] == 0
-
+class TestViewDetailFailure:
     def test_view_error_shaped_detail_is_not_a_success(self):
-        """`view` had the same hole as `download`, in both of its branches."""
         from tahuti.__main__ import cmd_view
 
         for target, ident in (
             (None, "1000099"),  # the id branch
             (f"{DOWNLOAD_HOST}/student/classes/1/core_tasks/1000099", None),
         ):
-            client = _download_client([], detail={"error": "Session expired"})
+            client = MagicMock()
+            client.base = DOWNLOAD_HOST
+            client.get_task_detail.return_value = {"error": "Session expired"}
+            client.find_task_by_id.return_value = None
             state = MagicMock()
             state.active_profile = "default"
             args = MagicMock(
@@ -868,76 +788,3 @@ class TestCacheTtlGatesTheSnapshot:
         assert meta["details"] is True
         assert meta["snapshot_source"] == "crawl"
 
-
-# ── Defect 10 — `download` fetched unvalidated URLs ─────────────────────
-
-
-class TestDownloadValidatesUrls:
-    def test_off_host_and_insecure_urls_are_refused(self, tmp_path):
-        attachments = [
-            {
-                "name": "payload.pdf",
-                "url": "https://cdn.evil.test/payload.pdf",
-                "source": "description",
-            },
-            {
-                "name": "plain.pdf",
-                "url": "http://myschool.managebac.com/plain.pdf",
-                "source": "description",
-            },
-            {
-                "name": "good.pdf",
-                "url": f"{DOWNLOAD_HOST}/attachments/1/good.pdf",
-                "source": "description",
-            },
-        ]
-        client = _download_client(attachments)
-        args = _DownloadArgs(output_dir=str(tmp_path / "out"))
-        rc, captured = _run_download(tmp_path, args, client, [_task()])
-
-        assert rc == 0
-        data = captured["payload"]["data"]
-        reasons = {f["name"]: f["reason"] for f in data["failed"]}
-        assert reasons["payload.pdf"] == "refused_off_domain_host"
-        assert reasons["plain.pdf"] == "refused_insecure_scheme"
-        assert data["downloaded_count"] == 1
-        # Nothing was ever fetched from the offending hosts.
-        fetched = {c.args[0] for c in client.session.get.call_args_list}
-        assert "https://cdn.evil.test/payload.pdf" not in fetched
-        assert "http://myschool.managebac.com/plain.pdf" not in fetched
-        assert (tmp_path / "out" / "payload.pdf").exists() is False
-
-    def test_every_url_refused_exits_nonzero(self, tmp_path):
-        attachments = [
-            {
-                "name": "payload.pdf",
-                "url": "https://cdn.evil.test/payload.pdf",
-                "source": "description",
-            }
-        ]
-        client = _download_client(attachments)
-        args = _DownloadArgs(output_dir=str(tmp_path / "out"))
-        rc, captured = _run_download(tmp_path, args, client, [_task()])
-
-        assert rc == 1
-        assert captured["payload"]["data"]["downloaded_count"] == 0
-        assert captured["payload"]["data"]["failed_count"] == 1
-
-    def test_subdomain_of_another_school_is_still_refused(self, tmp_path):
-        """Same registrable domain, different school: not our session's host."""
-        attachments = [
-            {
-                "name": "leak.pdf",
-                "url": "https://other-school.managebac.cn/attachments/1/leak.pdf",
-                "source": "description",
-            }
-        ]
-        client = _download_client(attachments)
-        args = _DownloadArgs(output_dir=str(tmp_path / "out"))
-        rc, captured = _run_download(tmp_path, args, client, [_task()])
-
-        assert rc == 1
-        assert (
-            captured["payload"]["data"]["failed"][0]["reason"]
-            == "refused_off_domain_host"
-        )

@@ -49,7 +49,6 @@ class TestBuildParser:
             "timetable",
             "grades",
             "count-grade-freq",
-            "download",
             "feedback",
             "submissions",
         }

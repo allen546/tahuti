@@ -50,6 +50,26 @@ def pad_string(s: str, width: int, align: str = "left") -> str:
         return s + " " * pad_len
 
 
+_PRETTY_URL_LIMIT = 400
+
+
+def display_url(url, limit: int = _PRETTY_URL_LIMIT) -> str:
+    """A URL shortened for the terminal, with everything dropped declared."""
+    text = str(url or "")
+    if not text:
+        return text
+    head, sep, query = text.partition("?")
+    notes: list[str] = []
+    if sep:
+        notes.append(f"query string omitted ({len(query)} chars)")
+    if len(head) > limit:
+        head = head[:limit] + "…"
+        notes.append(f"{len(text)} chars total")
+    if not notes:
+        return text
+    marker = "?…" if sep else ""
+    return f"{head}{marker} [{'; '.join(notes)}; full URL in --format json]"
+
 
 def resolve_format(requested_format: str | None) -> str:
     """Return the output format to use.
@@ -259,7 +279,7 @@ def render_pretty(payload: dict) -> str:
             if detail.get("submission"):
                 lines.append(f"  {detail['submission']}")
             for sub in submissions:
-                lines.append(f"  - {sub.get('name')} -> {sub.get('url')}")
+                lines.append(f"  - {sub.get('name')} -> {display_url(sub.get('url'))}")
 
         other_attachments = [a for a in detail.get("attachments", []) if a.get("source") != "submission"]
         if other_attachments:
@@ -267,7 +287,7 @@ def render_pretty(payload: dict) -> str:
             for attachment in other_attachments:
                 lines.append(
                     f"  - {attachment.get('source')}: {attachment.get('name')} "
-                    f"-> {attachment.get('url')}"
+                    f"-> {display_url(attachment.get('url'))}"
                 )
         return "\n".join(lines)
 

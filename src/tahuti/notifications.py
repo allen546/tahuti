@@ -43,7 +43,8 @@ HUB_ENDPOINTS = {
 
 
 def hub_for_domain(domain: str) -> str:
-    return HUB_ENDPOINTS.get(domain, HUB_ENDPOINTS["managebac.com"])
+    clean = str(domain or "").strip().lower().rstrip(".")
+    return HUB_ENDPOINTS.get(clean, HUB_ENDPOINTS["managebac.com"])
 
 
 class MNNHubClient:
