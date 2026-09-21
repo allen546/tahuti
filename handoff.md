@@ -76,6 +76,13 @@ PYTHONPATH=$PWD/src /Users/allen/Desktop/t8/mb-crawler/.venv/bin/python -m pytes
 - **Webcal Token TTL (`3848b19`):** Handled webcal tokens with per-entry cache TTL instead of maintaining a secondary cache object.
 - **Logout Purge & Domain Setup (`6e8dd90`):** Added `logout --purge` to wipe school profiles from `config.json`, and set `domain` defaults to `None` so users are only prompted if domain is unknown.
 
+### 3.6 Removed `tahuti download`, Host Guard, and Domain Allowlist (commit `1d259e3`)
+- **Removed `tahuti download`:** Downloading files is left to standard tools (`curl`, browsers, agents) using the URLs returned by `tahuti view` and MCP `get_task`. Deleted `cmd_download`, `download` subparser, `_safe_filename`, `_expected_download_host`, and `_refuse_reason_for_url` (~330 lines deleted).
+- **Eliminated Domain Allowlist (`ALLOWED_DOMAINS`):** Replaced hardcoded allowlist with bare hostname syntax validation (`_DOMAIN_RE`). Any valid ManageBac hostname is supported.
+- **Removed Cross-Host Guard (`_assert_same_host`):** ManageBac redirects to AWS S3 / CDNs. Python's `requests.Session` scopes cookies by domain (RFC 6265), preventing session exfiltration to S3. Off-host HTTPS redirects are followed safely up to 10 hops.
+- **Display URL Formatter:** Added `display_url` in `src/tahuti/formatters.py` to truncate long pre-signed S3 URLs and hide signature query strings in terminal pretty output.
+- **Tests Updated:** Removed `tests/test_download.py` and old download test cases. Added `tests/test_domain_shape_and_hub.py` (37 unit tests). Full suite: **1,451 passed, 1 xfailed, 1 xpassed in 18.64s** (net -838 lines).
+
 ---
 
 ## 4. Next Step: Local-Only Cached Test Suite
@@ -93,13 +100,6 @@ Instead of synthetic mock HTML strings, future scraper tests will run against **
 ---
 
 ## 5. Remaining Open Issues
-
-### 5.1 Complete Attachment Download & S3 URL Handling (`fix/remove-host-guard`)
-- **Status:** Secured at `/Users/allen/Desktop/t8/mb-crawler-wt-remove-host-guard`. Needs final cleanup and merge into `fix/mcp-cli-parity-and-efficiency`.
-- **Issues addressed:**
-  1. `tahuti download` was failing on redirects to S3 due to an invalid host allowlist check (`refused_off_domain_host`). The cookie jar is already scoped by domain, so requests does not send credentials to S3; the host check is unnecessary.
-  2. `tahuti view` was dropping attachments that already had direct S3 links in the HTML.
-  3. Pre-signed S3 tokens were inadvertently printed to logs in warning messages.
 
 ### 5.2 `get_classes()` Drops Classes Containing "view" or "browse"
 - In `client.py:2219`:
@@ -133,7 +133,7 @@ Current test suite status on `fix/mcp-cli-parity-and-efficiency`:
 
 ```bash
 $ PYTHONPATH=$PWD/src /Users/allen/Desktop/t8/mb-crawler/.venv/bin/python -m pytest -q
-1443 passed, 1 xfailed, 1 xpassed in 20.01s
+1451 passed, 1 xfailed, 1 xpassed in 18.64s
 ```
 
 All unit tests pass cleanly.
