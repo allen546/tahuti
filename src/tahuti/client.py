@@ -1487,20 +1487,30 @@ class ManageBacClient:
         }
 
     def get_submissions(
-        self, class_id: str, task_id: str, bypass_cache: bool = False
+        self,
+        class_id: str,
+        task_id: str,
+        bypass_cache: bool = False,
+        task_soup: BeautifulSoup | None = None,
+        dropbox_soup: BeautifulSoup | None = None,
     ) -> list[dict]:
         """List current submissions on a task page (or dropbox).
 
         Each entry includes ``asset_id``, ``name``, ``url``, ``uploaded_at``,
         ``can_delete``, ``delete_url``, and optional ``feedback_url`` and/or
         ``preview_modal_url``.
+
+        ``task_soup`` and ``dropbox_soup`` let a caller that has already fetched
+        those pages hand them over instead of paying for them again; left at
+        ``None`` each is fetched here exactly as before.
         """
         task_path = f"/student/classes/{class_id}/core_tasks/{task_id}"
-        soup = None
-        try:
-            soup = self._get(task_path, bypass_cache=bypass_cache)
-        except Exception:
-            pass
+        soup = task_soup
+        if soup is None:
+            try:
+                soup = self._get(task_path, bypass_cache=bypass_cache)
+            except Exception:
+                pass
 
         rows = []
         if soup:
@@ -1512,7 +1522,10 @@ class ManageBacClient:
         if not rows:
             dropbox_path = f"{task_path}/dropbox"
             try:
-                soup_drop = self._get(dropbox_path, bypass_cache=bypass_cache)
+                if dropbox_soup is not None:
+                    soup_drop = dropbox_soup
+                else:
+                    soup_drop = self._get(dropbox_path, bypass_cache=bypass_cache)
                 drop_rows = soup_drop.find_all("tr", class_=re.compile(r"file", re.IGNORECASE))
                 if not drop_rows:
                     drop_rows = soup_drop.find_all("tr")
@@ -1680,6 +1693,9 @@ class ManageBacClient:
             if m:
                 page_dropbox_id = m.group(1)
 
+        # Hoisted above the guard so the get_submissions call below can reuse
+        # the page instead of fetching it a second time.
+        soup_drop = None
         if not page_dropbox_id:
             try:
                 soup_drop = self._get(f"{task_path}/dropbox", bypass_cache=True)
@@ -1693,7 +1709,12 @@ class ManageBacClient:
             except Exception:
                 pass
 
-        submissions = self.get_submissions(class_id, task_id, bypass_cache=True)
+        # Both pages are in hand already; handing them over costs no reads. The
+        # verification read further down deliberately does not, because it has
+        # to see the page as it stands *after* the DELETE.
+        submissions = self.get_submissions(
+            class_id, task_id, bypass_cache=True, task_soup=soup, dropbox_soup=soup_drop
+        )
         if not submissions:
             raise ValueError(f"No submissions found for task {task_id}")
 
@@ -1756,7 +1777,9 @@ class ManageBacClient:
                 f"Delete request failed with HTTP {r.status_code}: {r.text[:200]}"
             )
 
-        # Post-delete verification: fetch task page freshly and ensure file is gone
+        # Post-delete verification: fetch task page freshly and ensure file is gone.
+        # No soup is handed over here — the pre-delete `soup` would still list
+        # the row, and reading it would make every delete look like a failure.
         self.invalidate_task_cache(class_id, task_id)
         subs_after = self.get_submissions(class_id, task_id, bypass_cache=True)
         if any(str(s.get("asset_id")) == str(asset_id) for s in subs_after):
