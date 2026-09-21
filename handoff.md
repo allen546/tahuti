@@ -108,6 +108,7 @@ Detailed technical specifications are documented in `docs/`:
    - **Local-only cached replay suite:** Replay real ManageBac HTTP responses recorded in `~/.config/tahuti/cache/` through `ManageBacClient` with a network circuit breaker.
    - Verifies real dashboard class parsing, task extraction, attachment links, and full crawl aggregation offline.
    - Strictly local and gitignored to protect sensitive student data; cleanly skipped on CI without cache.
+   - **Merged:** Landed on `fix/mcp-cli-parity-and-efficiency` in commit `c52cfa7`.
 
 ---
 
@@ -127,7 +128,7 @@ Current test suite status on `fix/mcp-cli-parity-and-efficiency`:
 
 ```bash
 $ PYTHONPATH=$PWD/src /Users/allen/Desktop/t8/mb-crawler/.venv/bin/python -m pytest -q
-1449 passed, 1 xfailed, 1 xpassed in 42.66s
+1458 passed, 1 xfailed, 1 xpassed in 45.30s
 ```
 
-All 1,449 unit and integration tests pass cleanly.
+All 1,458 unit, integration, and offline cached replay tests pass cleanly.
