@@ -648,22 +648,55 @@ whether anyone needs it. Record the answer here when it is known.
 
 Two read-only audits were launched on 2026-09-21 against
 `fix/mcp-cli-parity-and-efficiency`, prompted by the profile hypothesis in §7.9
-and broadened to the whole project:
+and broadened to the whole project.
 
-1. **Feature necessity** — six auditors (profiles/config, the daemon/event/webhook
-   subsystem, notifications + the MNN hub, the read surface + formatting, the
-   write surface, infra + `extras/`). Each returns a `remove`/`revise`/`keep`
-   verdict with evidence, what breaks, and a migration. Every `remove` and
-   `revise` claim then goes to an adversarial verifier instructed to refute it.
-2. **CLI and MCP interface** — five auditors (the 14 top-level commands, the 9
-   `daemon` subcommands, the 14 MCP tools, the CLI↔MCP correlation, and the
-   cross-cutting flags/output/error surfaces). Every revision claim is likewise
-   adversarially verified against the live `--help` text and source.
+### 9.1 Feature necessity — **relaunched with a corrected brief**
 
-Both synthesise into a ranked decision document. The two bear on each other: the
-daemon cut from audit 1 and the `daemon` subcommand revisions from audit 2 are
-the same question from two directions, and both were asked to state their
-findings so they can be cross-read.
+Six auditors, one per area: profiles/config, the daemon/event/webhook subsystem,
+notifications + the MNN hub, the read surface + formatting, the write surface,
+infra + `extras/`.
+
+**The brief was wrong on the first attempt and was stopped and rewritten.** The
+original asked each auditor to establish whether a capability was "reachable and
+working end to end", which quietly turns "this feature is half-built" into "this
+feature should be deleted". That is not the question. A feature that does not
+work can simply be made to work later *if the capability is worth it* — so the
+audit judges only whether it is worth it.
+
+The corrected brief makes the distinction explicit to every agent:
+
+> A feature that is broken, untested, half-built or unreachable is **not**
+> thereby unnecessary. It may be a valuable capability that was never finished.
+> Treating "it does not work" as "it should be deleted" is the easiest way to
+> produce a worthless audit, and it is wrong.
+
+Each finding therefore separates four things that the first version conflated:
+
+- the **capability**, stated as what a user gets, never as what the code does
+- **who needs it** — or an honest "I cannot identify one from the code"
+- **effort to own** — lines, complexity, maintenance surface, dependency risk
+- **effort to finish** — what it would take to make it correct, tested and
+  reachable, reported *separately* so "worth X to finish" is its own number
+
+The verdict is `keep` / `cut` / **`needs-owner-decision`**, where the third
+exists precisely for the case where necessity turns on how many users need
+something — which the code cannot answer and the agents are told not to guess.
+The adversarial verifiers are instructed to refute necessity claims *only*, and
+explicitly told that showing a feature is broken does not refute a necessity
+claim.
+
+### 9.2 CLI and MCP interface
+
+Five auditors: the 14 top-level commands, the 9 `daemon` subcommands, the 14 MCP
+tools, the CLI↔MCP correlation, and the cross-cutting flags/output/error
+surfaces. Every revision claim is adversarially verified against the live
+`--help` text and source.
+
+### Cross-reading them
+
+The two bear on each other: the daemon cut from 9.1 and the `daemon` subcommand
+revisions from 9.2 are the same question from two directions. Both were asked to
+state their findings so they can be read together.
 
 **Nothing from either audit has landed.** No code was modified. The results
 belong in §7 alongside §7.1–§7.10 once they arrive, and the profile question in
