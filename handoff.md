@@ -55,7 +55,10 @@ The repository's **main checkout** is:
 /Users/allen/Desktop/t8/mb-crawler
 ```
 
-It is currently on branch `fix/mcp-divergences-efficiency`.
+It is currently on branch `fix/mcp-divergences-efficiency`, which holds the
+divergence work at 1596 tests passing. **That branch is now superseded** — see
+`fix/mcp-cli-parity-and-efficiency` below, which is the branch everything has been
+merged into.
 
 Alongside it are **git worktrees** — separate working directories sharing one
 object store, so you can have several branches checked out at once without
@@ -65,14 +68,14 @@ object store, so you can have several branches checked out at once without
 
 | Path on disk | Branch | State |
 |---|---|---|
-| `/Users/allen/Desktop/t8/mb-crawler` | `fix/mcp-divergences-efficiency` | **the working branch**, 1596 tests pass |
-| `/Users/allen/Desktop/t8/mb-crawler-wt-handoff` | `docs/handoff` | this document; also holds a trial merge of all three efficiency branches (**1605 tests pass**) |
-| `/Users/allen/Desktop/t8/mb-crawler-wt-submit-local` | `fix/efficiency-submit-local` | verified, not merged |
+| `/Users/allen/Desktop/t8/mb-crawler` | `fix/mcp-divergences-efficiency` | divergence work, 1596 tests pass — superseded |
+| `/Users/allen/Desktop/t8/mb-crawler-wt-handoff` | `fix/mcp-cli-parity-and-efficiency` | **the final branch** — all efficiency work merged, **1605 tests pass**, and where this document lives |
+| `/Users/allen/Desktop/t8/mb-crawler-wt-submit-local` | `fix/efficiency-submit-local` | merged into the final branch; worktree left behind |
 | `/Users/allen/Desktop/t8/mb-crawler/.claude/worktrees/auth-head-simplify` | `fix/auth-head-simplify` | merged |
 | `/Users/allen/Desktop/t8/mb-crawler/.claude/worktrees/cache-per-entry-ttl` | `fix/cache-per-entry-ttl` | merged |
 | `/Users/allen/Desktop/t8/mb-crawler/.claude/worktrees/dead-config-and-paths` | `fix/dead-config-and-paths` | merged |
-| `/Users/allen/Desktop/t8/mb-crawler/.claude/worktrees/efficiency-delete-soups` | `fix/efficiency-delete-soups` | verified, not merged |
-| `/Users/allen/Desktop/t8/mb-crawler/.claude/worktrees/fix-efficiency-notifications` | `fix/efficiency-notifications` | verified, not merged |
+| `/Users/allen/Desktop/t8/mb-crawler/.claude/worktrees/efficiency-delete-soups` | `fix/efficiency-delete-soups` | merged into the final branch |
+| `/Users/allen/Desktop/t8/mb-crawler/.claude/worktrees/fix-efficiency-notifications` | `fix/efficiency-notifications` | merged into the final branch |
 | `/Users/allen/Desktop/t8/mb-crawler/.claude/worktrees/fix-test-hygiene` | `fix/test-hygiene` | merged |
 | `/Users/allen/Desktop/t8/mb-crawler/.claude/worktrees/mcp-filter-ladder` | `fix/mcp-filter-ladder` | merged |
 | `/Users/allen/Desktop/t8/mb-crawler/.claude/worktrees/mcp-share-cli` | `fix/mcp-share-cli-resolution` | merged |
@@ -89,8 +92,10 @@ These exist only as refs; check one out in the main checkout or make a worktree:
 | Branch | State |
 |---|---|
 | `main` | released 0.4.3, 34 h old |
-| `fix/mcp-cli-divergences` | merged into the working branch |
-| `fix/roster-single-source` | merged into the working branch |
+| `fix/mcp-cli-parity-and-efficiency` | **the final branch** — everything below, merged, 1605 tests pass |
+| `fix/mcp-divergences-efficiency` | the divergence work on its own, 1596 tests pass — an ancestor of the final branch |
+| `fix/mcp-cli-divergences` | merged, ancestor of `fix/mcp-divergences-efficiency` |
+| `fix/roster-single-source` | merged, ancestor of `fix/mcp-divergences-efficiency` |
 | `trial5` | **scratch, from a merge experiment. Safe to delete.** |
 
 ### Remotes
@@ -303,17 +308,18 @@ passwords, no real state touched.**
 
 ### What landed
 
-| # | Change | Effect | Where |
+| # | Change | Effect | Where it lives |
 |---|---|---|---|
-| 1 | `fetch_notifications=False` kwarg on `crawl_all` | `list` 6→3, `grades` 6→3, warm 2→0 | `fix/efficiency-notifications` |
-| 2 | `get_submissions(task_soup=, dropbox_soup=)` | `--delete` 7→5 cold **and** warm | `fix/efficiency-delete-soups` |
-| 3 | roster from `get_classes()` | `grades` 6→3 | already in via `fix/roster-single-source` |
-| 4 | local snapshot write in `cmd_submit` | `submit` 3→2 | `fix/efficiency-submit-local` |
-| 5 | reorder `_resolve_task_ids` | 0–1 request | **deliberately not done** — see §7 |
+| 1 | `fetch_notifications=False` kwarg on `crawl_all` | `list` 6→3, `grades` 6→3, warm 2→0 | `fix/efficiency-notifications` → **merged** |
+| 2 | `get_submissions(task_soup=, dropbox_soup=)` | `--delete` 7→5 cold **and** warm | `fix/efficiency-delete-soups` → **merged** |
+| 3 | roster from `get_classes()` | `grades` 6→3 | `fix/roster-single-source` → **merged** |
+| 4 | local snapshot write in `cmd_submit` | `submit` 3→2 | `fix/efficiency-submit-local` → **merged** |
+| 5 | reorder `_resolve_task_ids` | 0–1 request | **deliberately not done** — the saving is 0–1 requests, and it carries a risk the other four do not: `find_task_by_id` and the class-page walk can name *different* class ids for the same task id, and `_resolve_task_ids`'s answer becomes the POST URL for `submit`. The divergence could not be reproduced in a fixture, so it is a disclosed risk rather than a measured one. |
 
-All three unmerged branches were merged together in
-`/Users/allen/Desktop/t8/mb-crawler-wt-handoff` as a trial: **clean merge, 1605
-tests pass.** So the remaining work on the efficiency side is essentially
+All three efficiency branches are merged into the final branch
+`fix/mcp-cli-parity-and-efficiency`, checked out at
+`/Users/allen/Desktop/t8/mb-crawler-wt-handoff`. The merge was clean and the
+result is **1605 tests pass**. So the remaining work on the efficiency side is
 bookkeeping, not conflict resolution.
 
 ### Why the rest of the proposals were rejected
@@ -332,7 +338,7 @@ knowing about because they are counter-intuitive:
   parallelise into.
 - **Caching the MNN-hub JWT was rejected on credential lifetime**, and the reason
   is that *nobody has read the token's `exp` claim*. That single offline read
-  would settle it. See §7.
+  would settle it. See §7.5.
 
 ---
 
@@ -478,6 +484,56 @@ real config directory, or `myschool` was typed at the login prompt.
 `~/.config/tahuti/` and the pre-rename `~/.config/mb-crawler/`, then log in
 fresh with the real school subdomain.
 
+### 7.9 `logout` does not remove school data — **being fixed now**
+
+`cmd_logout` clears the session, the response cache and the credential files. It
+never touches the **school and domain**, which live in `config.json` under
+`profiles.<name>` (written by `save_profile`). So after a logout the machine
+still remembers which school the profile belongs to — the user asked to be
+logged out and the account's identity is still on disk.
+
+A second, related annoyance: `_prompt_login_setup` asks for the base domain on
+**every** interactive `login`, even when the profile already has one. Its own
+comment defends this on the grounds that `ProfileConfig.domain` and
+`SessionConfig.domain` both default to `"managebac.com"`, so a domain is never
+absent and an "only if unknown" rule would silently skip the one choice worth
+putting on screen. That defence *is* the bug: the fix is to make "unset"
+representable.
+
+The agreed scope ladder (confirmed with the user 2026-09-21):
+
+```
+logout                    -> session + cache + password/keychain
+logout --keep-credentials -> session + cache
+logout --purge            -> session + cache + password/keychain + whole profile entry
+```
+
+- All three forms clear the **session** as a base.
+- The **response cache** stays controlled by the existing `--keep-cache` flag in
+  all three forms.
+- `--purge` deletes `profiles.<name>` **wholesale** — school, domain, email, and
+  the whole `defaults` block (view/pages/subject/details/format/cache_ttl). The
+  profile ceases to exist; a later command must re-supply `--profile` or fall
+  back to the default profile name.
+- `--purge` with `--keep-credentials` is contradictory and must be refused
+  rather than silently resolving to one or the other.
+
+For the domain: `ProfileConfig.domain` and `SessionConfig.domain` become `None`
+by default, `config.py:337` stops substituting `"managebac.com"`, and the prompt
+switches to the same "only if unknown" rule the school and email fields already
+use. `auth.py:243`
+(`domain = domain or state.profile.domain or state.session.domain or "managebac.com"`)
+is already the correct single home for the default and should not change
+behaviour. The trap is `__main__.py:1118`, which does
+`extra_args.extend(["--domain", args.domain])` and would emit a literal
+`--domain None` once the default is `None`.
+
+**This work was delegated to a subagent in its own worktree and had not landed at
+the time of writing.** It is not in the final branch. Check for a
+`fix/logout-*` branch before assuming it is missing, and merge it before the code
+review in §8, since it touches `__main__.py`, `config.py` and `auth.py` — all of
+which the review will look at.
+
 ---
 
 ## 8. How to pick this up
@@ -486,14 +542,20 @@ fresh with the real school subdomain.
    the recent work and explains why the caching layer looks the way it does.
 2. **Get a working session** (§7.8). Without it nothing can be verified against a
    live server, and every fixture-based claim stays fixture-based.
-3. **Settle §7.1 and §7.2.** Both are one small change each; both currently ship
+3. **Check out the final branch:**
+   ```bash
+   cd /Users/allen/Desktop/t8/mb-crawler-wt-handoff   # already on it
+   git checkout fix/mcp-cli-parity-and-efficiency
+   ```
+4. **Land the `logout` / domain work** (§7.9). It was delegated to a subagent and
+   is not in the final branch yet. It touches `__main__.py`, `config.py` and
+   `auth.py`, so merge it *before* the review.
+5. **Settle §7.1 and §7.2.** Both are one small change each; both currently ship
    with a behaviour change that nothing documents.
-4. **Merge the three efficiency branches.** Already trial-merged clean at 1605
-   passing in `mb-crawler-wt-handoff`.
-5. **Run the code review for inelegant code** on the merged result — PEP8,
+6. **Run the code review for inelegant code** on the final merged branch — PEP8,
    elegance traded for negligible performance, duplication at the wrong altitude.
    That round was planned and has not happened.
-6. **Then** create `fix/<summary>`, merge, and open the PR to `origin/main`.
+7. **Then** open the PR `fix/mcp-cli-parity-and-efficiency` → `origin/main`.
 
 ---
 
@@ -506,7 +568,7 @@ fresh with the real school subdomain.
 | `+ fix/efficiency-notifications` | 1600 |
 | `+ fix/efficiency-delete-soups` | 1596 |
 | `+ fix/efficiency-submit-local` | 1601 |
-| **all three merged** (in `mb-crawler-wt-handoff`) | **1605 passed**, 1 xfailed, 1 xpassed |
+| **`fix/mcp-cli-parity-and-efficiency`** (all three merged) | **1605 passed**, 1 xfailed, 1 xpassed |
 
 All counts from `pytest -q` with `PYTHONPATH=$PWD/src` set to the worktree under
 test, and `tahuti.__file__` asserted to resolve inside it.
