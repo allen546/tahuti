@@ -332,25 +332,25 @@ class TestClientConcurrency:
         threads = []
 
         def worker():
-            with patch("tahuti.client.time.sleep"):
-                soup = client._get("/student/tasks_and_deadlines")
-                results.append(soup)
+            soup = client._get("/student/tasks_and_deadlines")
+            results.append(soup)
 
-        t1 = threading.Thread(target=worker)
-        t1.start()
+        with patch("tahuti.client.time.sleep"):
+            t1 = threading.Thread(target=worker)
+            t1.start()
 
-        assert first_thread_entered_request.wait(timeout=2)
+            assert first_thread_entered_request.wait(timeout=2)
 
-        t2 = threading.Thread(target=worker)
-        t2.start()
+            t2 = threading.Thread(target=worker)
+            t2.start()
 
-        # Small sleep to ensure t2 has started and is blocked on lock
-        time.sleep(0.05)
+            # Small sleep to ensure t2 has started and is blocked on lock
+            time.sleep(0.05)
 
-        resume_first_thread.set()
+            resume_first_thread.set()
 
-        t1.join(timeout=5)
-        t2.join(timeout=5)
+            t1.join(timeout=5)
+            t2.join(timeout=5)
 
         assert len(results) == 2
         assert call_count == 1
@@ -639,3 +639,42 @@ class TestConditionalRevalidation:
             m.get(self.URL, json=[])
             client.get_calendar_events("2026-04-29", "2026-05-05")
             assert "If-None-Match" not in m.request_history[-1].headers
+
+
+def test_rate_limiter_thread_safety():
+    """Concurrent threads respecting rate limits must be serialized by lock."""
+    import threading
+    import time
+    from tahuti.client import ManageBacClient
+
+    c = ManageBacClient("testschool", request_delay=0.05)
+    start = time.perf_counter()
+
+    threads = []
+    for _ in range(3):
+        t = threading.Thread(target=c._respect_rate_limit)
+        threads.append(t)
+        t.start()
+
+    for t in threads:
+        t.join()
+
+    total_time = time.perf_counter() - start
+    assert total_time >= 0.05
+
+
+def test_nav_class_labels_do_not_drop_real_class_names():
+    """Substrings like 'view' in 'Worldview' or 'Review' must not drop the class."""
+    from tahuti.client import _NAV_CLASS_LABELS
+
+    assert "worldview" not in _NAV_CLASS_LABELS
+    assert "media review" not in _NAV_CLASS_LABELS
+    assert "advanced view" not in _NAV_CLASS_LABELS
+    assert "browser technology" not in _NAV_CLASS_LABELS
+
+    assert "all classes" in _NAV_CLASS_LABELS
+    assert "browse" in _NAV_CLASS_LABELS
+    assert "view" in _NAV_CLASS_LABELS
+    assert "overview" in _NAV_CLASS_LABELS
+    assert "browse all classes" in _NAV_CLASS_LABELS
+    assert "view class" in _NAV_CLASS_LABELS

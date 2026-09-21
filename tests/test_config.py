@@ -257,6 +257,24 @@ class TestClearSession:
         clear_session(state)
         assert not session_path.exists()
 
+    def test_load_state_survives_malformed_profiles(self, tmp_path: Path, monkeypatch):
+        config_path = tmp_path / "config.json"
+        session_path = tmp_path / "session.json"
+        config_path.write_text(json.dumps({"profiles": None, "active_profile": "default"}))
+        session_path.write_text(json.dumps({"profiles": "not-a-dict"}))
+        monkeypatch.setenv("MANAGEBAC_CONFIG", str(config_path))
+        monkeypatch.setenv("MANAGEBAC_SESSION", str(session_path))
+
+        state = load_state()
+        assert state.profile.name == "default"
+        assert state.profile.school is None
+        assert state.session.cookie is None
+
+        # Saving and clearing should also survive malformed shapes without crashing
+        save_profile(state)
+        save_session(state)
+        clear_session(state)
+
 
 def test_write_json_is_atomic_and_0600(tmp_path):
     """Credential/session files must never exist world-readable."""

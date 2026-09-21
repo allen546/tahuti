@@ -83,6 +83,13 @@ PYTHONPATH=$PWD/src /Users/allen/Desktop/t8/mb-crawler/.venv/bin/python -m pytes
 - **Display URL Formatter:** Added `display_url` in `src/tahuti/formatters.py` to truncate long pre-signed S3 URLs and hide signature query strings in terminal pretty output.
 - **Tests Updated:** Removed `tests/test_download.py` and old download test cases. Added `tests/test_domain_shape_and_hub.py` (37 unit tests). Full suite: **1,451 passed, 1 xfailed, 1 xpassed in 18.64s** (net -838 lines).
 
+### 3.7 Resolved Small Code Issues (5.2, 5.3, 5.5)
+- **5.2 `get_classes()` Navigation Filter:** Replaced naive substring matching (`kw in name.lower()`) with exact matching against `_NAV_CLASS_LABELS` (`frozenset({"all classes", "browse", "view", "overview", "browse all classes", "view class"})`). Legitimate class names containing substrings like "Worldview", "Review", or "Advanced View" are no longer dropped.
+- **5.3 Malformed `profiles` Defense:** Added `_as_dict()` helper in `config.py` so `load_state()`, `save_profile()`, `save_session()`, `clear_session()`, and `purge_profiles()` safely tolerate `null`, string, or missing `profiles` maps without raising `AttributeError` or `TypeError`.
+- **5.4 SDK Default Domain Clarification:** Analyzed `ManageBacClient.__init__(..., domain="managebac.com")`. Confirmed this is **deliberate library behavior** providing a convenient default for direct SDK consumers and unit tests. The actual bug previously fixed was in `config.py` (`ProfileConfig.domain`), where defaulting to `"managebac.com"` hid unconfigured CLI profile states.
+- **5.5 Rate Limiter Thread Safety:** Serialized `_respect_rate_limit` using `self._rate_limit_lock` so concurrent worker threads are properly delayed and spaced out by at least `request_delay`.
+- **Test Suite Hygiene:** Fixed a mock leak in `test_concurrent_get_coalescing` where concurrent threads entered `patch("tahuti.client.time.sleep")`, inadvertently persisting a Mock into subsequent tests.
+
 ---
 
 ## 4. Next Step: Local-Only Cached Test Suite
@@ -101,24 +108,6 @@ Instead of synthetic mock HTML strings, future scraper tests will run against **
 
 ## 5. Remaining Open Issues
 
-### 5.2 `get_classes()` Drops Classes Containing "view" or "browse"
-- In `client.py:2219`:
-  ```python
-  if name and not any(kw in name.lower() for kw in ("all classes", "browse", "view")):
-  ```
-- Substring filtering accidentally excludes real classes like "Worldview", "Media Review", or "Advanced View".
-- **Fix:** Replace substring check with exact matching on known navigation strings, or filter by navigation element structure.
-
-### 5.3 `load_state` Error on Non-Dict `profiles`
-- In `config.py:340`: `config_data.get("profiles", {}).get(active_profile, {})` raises `AttributeError` if `profiles` in `config.json` is not a dictionary.
-- `load_state` should guard against non-dict `profiles` so `logout --purge` can recover corrupted configs.
-
-### 5.4 Redundant Default Domain in `client.py`
-- `client.py:582` still has `domain: str = "managebac.com"`. Clean up to use centralized domain resolution in `auth.py`.
-
-### 5.5 Rate Limiter Thread Safety
-- `_respect_rate_limit` uses an unlocked read-modify-write. Concurrent requests exceed the configured request delay. If parallel fetching is revisited in the future, rate limiting will need proper locking.
-
 ### 5.6 Repository Cleanup
 - Delete stray tracked file `json` in repository root.
 - Remove leftover test files in parent directory (`/Users/allen/Desktop/t8/mb-crawler-test-*`).
@@ -133,7 +122,7 @@ Current test suite status on `fix/mcp-cli-parity-and-efficiency`:
 
 ```bash
 $ PYTHONPATH=$PWD/src /Users/allen/Desktop/t8/mb-crawler/.venv/bin/python -m pytest -q
-1451 passed, 1 xfailed, 1 xpassed in 18.64s
+1454 passed, 1 xfailed, 1 xpassed in 44.11s
 ```
 
-All unit tests pass cleanly.
+All unit and integration tests pass cleanly.

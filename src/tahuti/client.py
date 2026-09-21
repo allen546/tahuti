@@ -565,6 +565,11 @@ def _tile_score_variant(score_div) -> str | None:
     return match.group(1) if match else None
 
 
+_NAV_CLASS_LABELS = frozenset(
+    {"all classes", "browse", "view", "overview", "browse all classes", "view class"}
+)
+
+
 class ManageBacClient:
     """HTTP client for ManageBac with session-based auth.
 
@@ -605,6 +610,7 @@ class ManageBacClient:
         self._last_url: str | None = None
         self._url_locks: dict[str, threading.Lock] = {}
         self._url_locks_mutex = threading.Lock()
+        self._rate_limit_lock = threading.Lock()
 
     @property
     def subdomain(self) -> str:
@@ -723,13 +729,17 @@ class ManageBacClient:
         return kwargs
 
     def _respect_rate_limit(self) -> None:
-        now = time.time()
-        elapsed = now - getattr(self, "_last_request_time", 0.0)
-        min_delay = getattr(self, "request_delay", 1.0)
-        if elapsed < min_delay:
-            sleep_time = (min_delay - elapsed) * random.uniform(0.75, 1.25)
-            time.sleep(max(0.0, sleep_time))
-        self._last_request_time = time.time()
+        lock = getattr(self, "_rate_limit_lock", None)
+        if lock is None:
+            lock = self._rate_limit_lock = threading.Lock()
+        with lock:
+            now = time.time()
+            elapsed = now - getattr(self, "_last_request_time", 0.0)
+            min_delay = getattr(self, "request_delay", 1.0)
+            if elapsed < min_delay:
+                sleep_time = (min_delay - elapsed) * random.uniform(0.75, 1.25)
+                time.sleep(max(0.0, sleep_time))
+            self._last_request_time = time.time()
 
     def _follow_redirects_safely(
         self,
@@ -2147,7 +2157,7 @@ class ManageBacClient:
             if match:
                 class_id = match.group(1)
                 name = a.get_text(" ", strip=True)
-                if name and not any(kw in name.lower() for kw in ("all classes", "browse", "view")):
+                if name and name.lower() not in _NAV_CLASS_LABELS:
                     seen[class_id] = name
         return seen
 

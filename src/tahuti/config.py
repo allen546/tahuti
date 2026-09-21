@@ -72,6 +72,11 @@ def _coerce_cache_ttl(value: object) -> int:
     return int(value)
 
 
+def _as_dict(value: Any) -> dict:
+    """Return *value* if it is a dict, else an empty dict."""
+    return value if isinstance(value, dict) else {}
+
+
 # The base domain is deliberately *not* defaulted here. ``None`` means "not
 # configured", and ``auth.build_client`` substitutes the string
 # ``"managebac.com"`` at the one point a domain has to become one — after the
@@ -337,9 +342,9 @@ def load_state(
         or DEFAULT_PROFILE_NAME
     )
 
-    profile_data = config_data.get("profiles", {}).get(active_profile, {})
-    defaults = profile_data.get("defaults", {})
-    session_profile_data = session_data.get("profiles", {}).get(active_profile, {})
+    profile_data = _as_dict(_as_dict(config_data.get("profiles")).get(active_profile))
+    defaults = _as_dict(profile_data.get("defaults"))
+    session_profile_data = _as_dict(_as_dict(session_data.get("profiles")).get(active_profile))
 
     profile = ProfileConfig(
         name=active_profile,
@@ -393,7 +398,9 @@ def load_state(
 
 def save_profile(state: AppState) -> None:
     config_data = _read_json(state.config_path)
-    profiles = config_data.setdefault("profiles", {})
+    profiles = config_data.get("profiles")
+    if not isinstance(profiles, dict):
+        profiles = config_data["profiles"] = {}
     profiles[state.active_profile] = {
         "school": state.profile.school,
         "domain": state.profile.domain,
@@ -414,7 +421,9 @@ def save_profile(state: AppState) -> None:
 
 def save_session(state: AppState) -> None:
     session_data = _read_json(state.session_path)
-    profiles = session_data.setdefault("profiles", {})
+    profiles = session_data.get("profiles")
+    if not isinstance(profiles, dict):
+        profiles = session_data["profiles"] = {}
     profiles[state.active_profile] = {
         "school": state.session.school,
         "domain": state.session.domain,
@@ -455,7 +464,7 @@ def clear_session(state: AppState, all_profiles: bool = False) -> None:
         return
 
     session_data = _read_json(state.session_path)
-    profiles = session_data.get("profiles", {})
+    profiles = _as_dict(session_data.get("profiles"))
     profiles.pop(state.active_profile, None)
     if profiles:
         session_data["profiles"] = profiles
@@ -497,15 +506,7 @@ def purge_profiles(state: AppState, all_profiles: bool = False) -> list[str]:
     than claiming a deletion that did not happen.
     """
     config_data = _read_json(state.config_path)
-    profiles = config_data.get("profiles")
-    if not isinstance(profiles, dict):
-        # A hand-edited file can carry any shape here, so this is not assumed to
-        # be a map. Note that this does *not* make `logout` survive a malformed
-        # config: `cmd_logout` calls `load_state` first, and that reads
-        # `config_data.get("profiles", {}).get(...)` without the check. The
-        # guard is for library callers holding an AppState, who reach this
-        # function without going through `load_state` at all.
-        profiles = {}
+    profiles = _as_dict(config_data.get("profiles"))
 
     if all_profiles:
         targets = sorted(profiles)
