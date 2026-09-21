@@ -585,6 +585,40 @@ only way to tell which profiles existed).
 
 ---
 
+### 7.10 How many users actually need two profiles? — **unanswered, and load-bearing**
+
+This is the question the profile cut in §7.9 ultimately turns on, and it is
+**not answerable from this repository.**
+
+There is no telemetry, no analytics, no crash reporting. The code cannot reveal
+user behaviour. An issue tracker or a star/fork count on the upstream remote
+might carry signal, but nothing of the kind has been consulted.
+
+The reasoning that makes it matter:
+
+- The profile system's *entire* justification is the multi-account scenario. If
+  that scenario is rare, 268 references across 6 files buy nothing.
+- ManageBac accounts are per-school. A student ordinarily holds **one**. The
+  plausible multi-account cases are narrow: dual enrolment at two schools at
+  once, a transfer mid-year where both instances stay live, someone holding both
+  a `managebac.com` and a `managebac.cn` account, or a developer testing against
+  several schools. A family with several children is *not* this case — each child
+  has their own login, so that is several people, not one person with several
+  profiles.
+- So the honest expectation is that the population needing this is small. But
+  "small" is not "zero", and the audit cannot tell the difference.
+
+What the audit **can** settle is the narrower and more decisive question: does
+the profile system actually *work* end to end — can a user really create a second
+profile and switch to it from the CLI and the MCP server? If it does not work,
+the user count is moot and the cut is free. That is being tested.
+
+**Do not cut profiles on the strength of the audit alone.** The audit establishes
+whether the capability is reachable and functional; only the project owner knows
+whether anyone needs it. Record the answer here when it is known.
+
+---
+
 ## 8. How to pick this up
 
 1. **Read `docs/http-revalidation-findings.md`.** It is the intellectual core of
@@ -607,6 +641,33 @@ only way to tell which profiles existed).
    elegance traded for negligible performance, duplication at the wrong altitude.
    That round was planned and has not happened.
 7. **Then** open the PR `fix/mcp-cli-parity-and-efficiency` → `origin/main`.
+
+---
+
+## 9. The audit in flight
+
+Two read-only audits were launched on 2026-09-21 against
+`fix/mcp-cli-parity-and-efficiency`, prompted by the profile hypothesis in §7.9
+and broadened to the whole project:
+
+1. **Feature necessity** — six auditors (profiles/config, the daemon/event/webhook
+   subsystem, notifications + the MNN hub, the read surface + formatting, the
+   write surface, infra + `extras/`). Each returns a `remove`/`revise`/`keep`
+   verdict with evidence, what breaks, and a migration. Every `remove` and
+   `revise` claim then goes to an adversarial verifier instructed to refute it.
+2. **CLI and MCP interface** — five auditors (the 14 top-level commands, the 9
+   `daemon` subcommands, the 14 MCP tools, the CLI↔MCP correlation, and the
+   cross-cutting flags/output/error surfaces). Every revision claim is likewise
+   adversarially verified against the live `--help` text and source.
+
+Both synthesise into a ranked decision document. The two bear on each other: the
+daemon cut from audit 1 and the `daemon` subcommand revisions from audit 2 are
+the same question from two directions, and both were asked to state their
+findings so they can be cross-read.
+
+**Nothing from either audit has landed.** No code was modified. The results
+belong in §7 alongside §7.1–§7.10 once they arrive, and the profile question in
+§7.10 must be answered before the profile cut is executed.
 
 ---
 
