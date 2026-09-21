@@ -104,18 +104,21 @@ Detailed technical specifications are documented in `docs/`:
    - **Single-account flattening:** Remove multi-profile complexity (`--profile`, `profiles.<name>`, `purge_profiles()`, multi-profile merging) in favor of flat `config.json` and `session.json`. Multi-account testing can use standard Unix isolation (`HOME=/dir`).
    - **Clean credential paths:** Delete stale helper functions (`creds_filename`, `default_creds_path`, `legacy_creds_path`, `creds_paths`, `all_creds_paths`) in favor of direct `resolve_creds_path()`.
    - **Task verb consolidation (Issue 4):** Fold `submissions` and `feedback` into `tahuti view` and `tahuti submit`.
+   - **Merged:** Landed in commit `ded2e1d` (net deletion of 1,483 lines of profile & grades code).
 2. [`docs/plan-local-cached-tests.md`](docs/plan-local-cached-tests.md):
    - **Local-only cached replay suite:** Replay real ManageBac HTTP responses recorded in `~/.config/tahuti/cache/` through `ManageBacClient` with a network circuit breaker.
    - Verifies real dashboard class parsing, task extraction, attachment links, and full crawl aggregation offline.
    - Strictly local and gitignored to protect sensitive student data; cleanly skipped on CI without cache.
-   - **Merged:** Landed on `fix/mcp-cli-parity-and-efficiency` in commit `c52cfa7`.
+   - **Merged:** Landed in commit `c52cfa7`.
+
+Both branches were merged into `fix/mcp-cli-parity-and-efficiency` and promoted to `main` (commit `0bb6d92` / `3f026f1`).
 
 ---
 
 ## 5. Remaining Open Issues
 
 ### 5.6 Repository Cleanup
-- Delete stray tracked file `json` in repository root.
+- [x] Delete stray tracked file `json` in repository root (deleted in `3f026f1`).
 - Remove leftover test files in parent directory (`/Users/allen/Desktop/t8/mb-crawler-test-*`).
 - Delete scratch branch `trial5`.
 - Prune merged/unused git worktrees.
@@ -124,11 +127,11 @@ Detailed technical specifications are documented in `docs/`:
 
 ## 6. Verification Summary
 
-Current test suite status on `fix/mcp-cli-parity-and-efficiency`:
+Current test suite status on `main`:
 
 ```bash
 $ PYTHONPATH=$PWD/src /Users/allen/Desktop/t8/mb-crawler/.venv/bin/python -m pytest -q
-1458 passed, 1 xfailed, 1 xpassed in 45.30s
+1416 passed, 1 xfailed, 1 xpassed in 52.76s
 ```
 
-All 1,458 unit, integration, and offline cached replay tests pass cleanly.
+All 1,416 unit, integration, and offline cached replay tests pass cleanly. Net repo diff since release v0.4.3: **-1,735 lines** (+5,140 / -6,875).
