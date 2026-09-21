@@ -1470,39 +1470,26 @@ def cmd_submit(args) -> int:
         print_payload(payload, args.output, args.format)
         return 1
 
-    # Eagerly refresh the snapshot so subsequent commands reflect the submission
-    # immediately.  A row that is already there needs only its submission state
-    # flipped: re-fetching the whole class grade page to update one task's row
-    # costs a request per submit, and `bypass_cache=True` means the response
-    # cache cannot spare it even when the page was fetched moments earlier.
-    # `_set_submission_state` is the same local write `submissions --add` makes —
-    # it invalidates the task's cached detail pages instead of re-reading them,
-    # and it writes `status` and `has_submit_button` together so a row cannot
-    # end up claiming a submission while still offering the upload.
-    #
-    # A task with no row yet keeps the full refresh: that fetch is the only
-    # thing that puts the task in the snapshot at all, so dropping it would lose
-    # a submitted task entirely.  There is no row to take a class name from in
-    # that arm either, hence the bare `None` the old expression always produced.
+    # Eagerly refresh the class in the snapshot so subsequent commands reflect submission immediately
     try:
         old_snapshot = load_snapshot(snapshot_path)
         existing_task = find_task_by_id(old_snapshot, task_id)
+        class_name = existing_task.get("class_name") if existing_task else None
 
-        if existing_task:
-            _set_submission_state(snapshot_path, task_id, True, client=client)
-        else:
-            fresh_tasks = client.get_class_tasks(
-                class_id, class_name=None, bypass_cache=True
+        fresh_tasks = client.get_class_tasks(
+            class_id, class_name=class_name, bypass_cache=True
+        )
+        if fresh_tasks:
+            update_snapshot_with_class_tasks(
+                snapshot_path, fresh_tasks, client=client
             )
-            if fresh_tasks:
-                update_snapshot_with_class_tasks(
-                    snapshot_path, fresh_tasks, client=client
-                )
-                log.info(
-                    "Eagerly refreshed snapshot for class %s (%d tasks)",
-                    class_id,
-                    len(fresh_tasks),
-                )
+            log.info(
+                "Eagerly refreshed snapshot for class %s (%d tasks)",
+                class_id,
+                len(fresh_tasks),
+            )
+        elif existing_task:
+            _set_submission_state(snapshot_path, task_id, True, client=client)
     except Exception as exc:
         log.warning("Failed to eagerly refresh snapshot after submit: %s", exc)
         try:
