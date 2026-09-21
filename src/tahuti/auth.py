@@ -240,6 +240,14 @@ def build_client(
     """
     state = load_state(profile)
     school = school or state.profile.school or state.session.school
+    # The single place the base domain's string default belongs, and it is
+    # already correct: flag, then profile, then session, then "managebac.com".
+    # Everything upstream reports `None` for "not configured"
+    # (`ProfileConfig.domain` / `SessionConfig.domain` default to it, and
+    # `load_state` reads the config key without a fallback), so this `or` chain
+    # is what turns "nobody said" into a hostname — and it is the *only* such
+    # substitution, which is why `_prompt_login_setup` can now ask only when
+    # nothing supplies one. Do not move the default upstream of here.
     domain = domain or state.profile.domain or state.session.domain or "managebac.com"
 
     if not school:

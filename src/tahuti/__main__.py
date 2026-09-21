@@ -68,6 +68,7 @@ from .config import (
     own_state_refusal,
     PASSWORD_ENV,
     PASSWORD_ENV_LEGACY,
+    purge_profiles,
     resolve_creds_path,
     save_profile,
     save_session,
@@ -130,12 +131,24 @@ def _stdin_is_interactive() -> bool:
 def _prompt_login_setup(args) -> None:
     """Walk a fresh device through domain, school and email, in that order.
 
-    Asks about what is still unknown — plus the domain, which always has a
-    value and is therefore always confirmed — so a configured machine is not
+    Asks about what is still unknown, so a configured machine is not
     interrogated and a new one is walked through instead of failing on a flag
     nobody knew it needed. The password prompt stays in :func:`_build_client`
     and runs last, which puts the credential questions in the order they are
     actually used.
+
+    The domain obeys exactly the same rule as school and email. It used to be
+    exempted — "always confirm it, because it always has a value" — on the
+    grounds that ``ProfileConfig.domain`` and ``SessionConfig.domain`` defaulted
+    to ``"managebac.com"`` and so a domain could never be *absent*. That
+    reasoning made the exemption self-fulfilling: the default was the reason the
+    question could not be skipped, and the question was the reason nobody
+    noticed the default was doing the answering. Both dataclass fields default
+    to ``None`` now, ``load_state`` reads the config key without a fallback, and
+    :func:`auth.build_client` is the one place the string is substituted — so
+    "nothing supplies a domain" is a state this function can actually observe,
+    and a ``managebac.cn`` operator is asked once, on the device that does not
+    know yet, rather than on every login thereafter.
 
     Deliberately gated on ``login``: every other command funnels through
     ``_build_client`` too, and prompting there would stall ``list``/``submit``
@@ -154,19 +167,18 @@ def _prompt_login_setup(args) -> None:
     profile = getattr(state, "profile", None)
     session = getattr(state, "session", None)
 
-    # `--domain` is the override, and without it this is always asked. It looks
-    # redundant next to the school/email "only if unknown" rule below, but
-    # `ProfileConfig.domain` and `SessionConfig.domain` both default to
-    # "managebac.com", so a domain is *never* absent — an "only if unknown" rule
-    # would silently skip the one choice worth putting on screen.
-    if not args.domain:
-        current_domain = (
-            getattr(profile, "domain", None)
-            or getattr(session, "domain", None)
-            or "managebac.com"
-        )
-        # Empty means "keep it" rather than an error, so the common case is one
-        # keystroke instead of a flag you have to remember exists.
+    # Same shape as the school and email rules below: `--domain` is the
+    # override, and the question is asked only when neither the profile nor the
+    # session supplies one. Reaching this branch at all means every source came
+    # back empty, so the value on screen is the built-in default rather than a
+    # saved one — an empty answer adopts it, which is one keystroke instead of a
+    # flag you have to remember exists.
+    if not (
+        args.domain
+        or getattr(profile, "domain", None)
+        or getattr(session, "domain", None)
+    ):
+        current_domain = "managebac.com"
         args.domain = (
             input(f"Base domain [{current_domain}]: ").strip() or current_domain
         )
@@ -851,7 +863,33 @@ def cmd_view(args) -> int:
     return 0
 
 
+def _reject_purge_with_keep_credentials(args) -> None:
+    """Refuse ``--purge --keep-credentials`` instead of silently doing one.
+
+    The two flags ask for opposite things: ``--purge`` deletes the profile's
+    password file(s), its keychain entry *and* its entire ``config.json`` entry,
+    while ``--keep-credentials`` asks for the password to survive so the next
+    command can log in silently. Picking a winner would leave the operator
+    believing they had asked for the other one — and the dangerous direction is
+    the silent one, where a password outlives a logout the user thought was
+    complete. Refusing costs one re-run.
+    """
+    if not (getattr(args, "purge", False) and getattr(args, "keep_credentials", False)):
+        return
+    raise CommandError(
+        "conflicting_flags",
+        "--purge and --keep-credentials contradict each other: --purge deletes "
+        "this profile's password file, its keychain entry and its entire "
+        "config.json entry, while --keep-credentials asks for the password to "
+        "be kept for silent re-login. Pass one or the other.",
+    )
+
+
 def cmd_logout(args) -> int:
+    # Refuse before anything is cleared: a contradiction discovered halfway
+    # through would leave the session gone and the credentials half-kept.
+    _reject_purge_with_keep_credentials(args)
+
     state = load_state(args.profile, args.config, args.session_file)
     clear_session(state, all_profiles=args.all)
 
@@ -894,6 +932,21 @@ def cmd_logout(args) -> int:
         if email:
             keychain_removed = keychain.delete(email)
 
+    # The half of "logout" that used to be missing: the session, the cache and
+    # the password went, but the `profiles.<name>` entry in config.json stayed —
+    # so the machine still knew which school it belonged to and the next command
+    # silently re-authenticated against it. `--purge` removes that entry too,
+    # wholesale (school, domain, email and the `defaults` block), which is what
+    # makes the profile genuinely cease to exist rather than merely go quiet.
+    #
+    # `--all` purges every profile's entry; what is left is an empty `profiles`
+    # map with no `active_profile`, which `load_state` already tolerates.
+    purged_profiles = (
+        purge_profiles(state, all_profiles=args.all)
+        if getattr(args, "purge", False)
+        else []
+    )
+
     payload = ok(
         "logout",
         state.active_profile,
@@ -905,6 +958,14 @@ def cmd_logout(args) -> int:
             "credential_files_removed": cleared_paths,
             "keychain_entry_removed": keychain_removed,
             "credentials_kept": bool(getattr(args, "keep_credentials", False)),
+            # New keys, so no existing key changes meaning for a script reading
+            # this payload. `profile_purged` is the policy (was --purge asked
+            # for); `profile_entry_removed` is the outcome (did a config.json
+            # entry actually go); `profiles_purged` names them, which under
+            # `--all` is the only way to tell which profiles existed.
+            "profile_purged": bool(getattr(args, "purge", False)),
+            "profile_entry_removed": bool(purged_profiles),
+            "profiles_purged": purged_profiles,
         },
     )
     print_payload(payload, args.output, args.format)
@@ -1114,6 +1175,12 @@ def cmd_daemon_start(args) -> int:
             extra_args.extend(["--session-file", args.session_file])
         if getattr(args, "school", None):
             extra_args.extend(["--school", args.school])
+        # Falsy, not `is not None`: `--domain` has no argparse default, so it is
+        # `None` when unset, and `["--domain", None]` would put the literal
+        # string "None" in the detached child's argv — where it reaches
+        # `_validate_school_domain` and fails as an unsupported domain. Leaving
+        # the flag off lets the child resolve the domain itself from the profile
+        # it loads, exactly as an interactive shell would.
         if getattr(args, "domain", None):
             extra_args.extend(["--domain", args.domain])
         if getattr(args, "email", None):
@@ -2326,6 +2393,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep the saved password so later commands can log in silently "
         "(by default `logout` deletes this profile's creds file and any keychain "
         "entry; `logout --all` deletes every profile's)",
+    )
+    logout.add_argument(
+        "--purge",
+        action="store_true",
+        help="Also delete this profile's entry from config.json — school, "
+        "domain, email and the defaults block — so the machine stops "
+        "remembering which school it belongs to. Implies the credential "
+        "deletion above, so it cannot be combined with --keep-credentials. "
+        "With --all, every profile's entry goes and config.json is left with "
+        "an empty profiles map",
     )
     logout.add_argument("--output", "-o", help="Write output to file")
     logout.add_argument(

@@ -1413,16 +1413,18 @@ class TestLoginInteractiveSetup:
         """Persist real state so `_prompt_login_setup` sees known values.
 
         Goes through the actual save functions rather than hand-writing JSON:
-        the saved domain lives in *both* config.json and session.json, and
-        `ProfileConfig.domain` defaults to "managebac.com", so a session-only
-        file leaves a truthy default that masks the saved value.
+        the saved domain lives in *both* config.json and session.json, so a
+        session-only file would leave the profile reporting "unset" and make the
+        prompt fire when it should not. `domain=None` means genuinely unset and
+        is stored as null — `ProfileConfig.domain` no longer defaults it to
+        "managebac.com", which is what makes "unknown" observable here at all.
         """
         state = m.load_state(None, None, None)
         state.profile.school = school
-        state.profile.domain = domain or "managebac.com"
+        state.profile.domain = domain
         state.profile.email = email
         state.session.school = school
-        state.session.domain = domain or "managebac.com"
+        state.session.domain = domain
         state.session.email = email
         state.session.cookie = cookie
         m.save_profile(state)
@@ -1456,20 +1458,25 @@ class TestLoginInteractiveSetup:
         assert args.school == "myschool"
         assert args.email == "student@example.com"
 
-    def test_configured_device_only_confirms_the_domain(self, isolated_env):
-        """School and email are known, so they are not re-asked.
+    def test_configured_device_is_asked_for_nothing(self, isolated_env):
+        """School, email and domain are all known, so nothing is re-asked.
 
-        The domain still is, and shows the saved value — that is the point: a
-        ``managebac.cn`` operator must be able to see the domain in play rather
-        than have it inherit a silent default.
+        The domain included. It used to be exempted from the "only if unknown"
+        rule — always confirmed, on the grounds that it always had a value — and
+        that exemption was the defect: a ``managebac.cn`` operator was asked to
+        re-confirm their domain on every single interactive login. Now that
+        "unset" is representable (``ProfileConfig.domain`` defaults to ``None``),
+        a saved domain is a known value like any other and the question is
+        skipped. The flag is still the override when it *is* wanted — see
+        ``test_explicit_domain_flag_suppresses_the_prompt`` for the mirror case.
         """
         self._write_profile(
             school="myschool", domain="managebac.cn", email="student@example.com"
         )
         args = self._login_args()
-        asked = self._run(args, [""])
-        assert asked == ["Base domain [managebac.cn]: "]
-        assert args.domain == "managebac.cn"  # empty means "keep it"
+        asked = self._run(args, [])
+        assert asked == []
+        assert args.domain is None
         assert args.school is None
         assert args.email is None
 

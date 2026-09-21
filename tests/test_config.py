@@ -59,7 +59,13 @@ class TestLoadState:
         monkeypatch.setenv("MANAGEBAC_SESSION", str(session_path))
         state = load_state()
         assert state.active_profile == "default"
-        assert state.profile.domain == "managebac.com"
+        # None, not "managebac.com". This assertion used to encode the string
+        # default, which was the bug: a domain that is never absent cannot be
+        # asked about only when unknown, so `_prompt_login_setup` re-asked it on
+        # every interactive login. `auth.build_client` substitutes the default,
+        # at the one place a domain has to become a hostname.
+        assert state.profile.domain is None
+        assert state.session.domain is None
         assert state.session.cookie is None
 
     def test_loads_from_existing_files(self, tmp_path: Path, monkeypatch):

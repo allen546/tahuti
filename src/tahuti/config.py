@@ -72,11 +72,21 @@ def _coerce_cache_ttl(value: object) -> int:
     return int(value)
 
 
+# The base domain is deliberately *not* defaulted here. ``None`` means "not
+# configured", and ``auth.build_client`` substitutes the string
+# ``"managebac.com"`` at the one point a domain has to become one — after the
+# flags, the profile and the session have all had their say. It used to be the
+# dataclass default below, which made a domain *never* absent: an unset profile
+# reported ``"managebac.com"``, the "only ask for what is unknown" rule in
+# ``_prompt_login_setup`` could never fire, and every interactive ``login``
+# re-asked the one question a configured machine had already answered.
+
+
 @dataclass
 class ProfileConfig:
     name: str
     school: str | None = None
-    domain: str = "managebac.com"
+    domain: str | None = None
     email: str | None = None
     default_view: str = "all"
     default_pages: int = 10
@@ -90,7 +100,7 @@ class ProfileConfig:
 class SessionConfig:
     name: str
     school: str | None = None
-    domain: str = "managebac.com"
+    domain: str | None = None
     email: str | None = None
     base_url: str | None = None
     cookie: str | None = None
@@ -334,7 +344,15 @@ def load_state(
     profile = ProfileConfig(
         name=active_profile,
         school=profile_data.get("school"),
-        domain=profile_data.get("domain", "managebac.com"),
+        # No `"managebac.com"` fallback here, deliberately. `dict.get(key)`
+        # returns None for an absent key *and* for a key present with an
+        # explicit null, so a config written by hand or by an older
+        # `save_profile` carrying `"domain": null` lands on exactly the same
+        # `None` as a config with no domain key at all — which is the point:
+        # "unset" has to be representable, or the login prompt cannot tell a
+        # configured machine from a fresh one. `auth.build_client` substitutes
+        # the default, at the one place a domain must become a string.
+        domain=profile_data.get("domain"),
         email=profile_data.get("email"),
         default_view=defaults.get("view", "all"),
         default_pages=defaults.get("pages", 10),
@@ -353,6 +371,11 @@ def load_state(
     session = SessionConfig(
         name=active_profile,
         school=session_profile_data.get("school"),
+        # Session falls back to the profile, which is already correct: the
+        # session file is written on every login from the resolved client, so it
+        # normally carries a domain of its own. When it does not, an unset
+        # profile means `None` reaches `SessionConfig` too — still "unset", never
+        # the built-in default, which is what keeps the login prompt honest.
         domain=session_profile_data.get("domain", profile.domain),
         email=session_profile_data.get("email"),
         base_url=session_profile_data.get("base_url"),
@@ -441,6 +464,80 @@ def clear_session(state: AppState, all_profiles: bool = False) -> None:
         _write_json(state.session_path, session_data)
     elif state.session_path.exists():
         state.session_path.unlink()
+
+
+def purge_profiles(state: AppState, all_profiles: bool = False) -> list[str]:
+    """Delete profile entries from ``config.json``, returning the names removed.
+
+    ``logout`` used to stop at the session, the cache and the credential files,
+    which left the ``profiles.<name>`` entry in place — so a machine that had
+    just been logged out still knew which school it belonged to, and the next
+    command silently re-authenticated against it. This is the other half.
+
+    The entry goes **wholesale**: school, domain, email *and* the ``defaults``
+    block. Emptying the fields instead would leave a half-profile that
+    ``load_state`` happily resolves, so the machine would keep naming a school
+    it no longer has any settings for.
+
+    ``active_profile`` is dropped when it names a profile that is no longer in
+    the map, because otherwise the next command would resolve straight back to
+    the missing name and report an empty profile as configured. With no pointer
+    left, ``load_state`` falls back to :data:`DEFAULT_PROFILE_NAME`, which is
+    the documented outcome: re-supply ``--profile``, or accept the default.
+
+    An empty ``profiles`` map is a shape ``load_state`` already tolerates — it
+    reads ``config_data.get("profiles", {})`` — so ``--purge --all`` leaves a
+    file that still parses and still loads, with every field reporting ``None``.
+    The map is kept rather than removed so a later ``save_profile`` has
+    ``setdefault`` to write into without reconstructing the file.
+
+    Returns the names actually removed, which is empty both when there was
+    nothing to remove and when there was no config file at all. A purge that
+    deleted nothing is not a failure, and the caller reports it as such rather
+    than claiming a deletion that did not happen.
+    """
+    config_data = _read_json(state.config_path)
+    profiles = config_data.get("profiles")
+    if not isinstance(profiles, dict):
+        # A hand-edited file can carry any shape here, so this is not assumed to
+        # be a map. Note that this does *not* make `logout` survive a malformed
+        # config: `cmd_logout` calls `load_state` first, and that reads
+        # `config_data.get("profiles", {}).get(...)` without the check. The
+        # guard is for library callers holding an AppState, who reach this
+        # function without going through `load_state` at all.
+        profiles = {}
+
+    if all_profiles:
+        targets = sorted(profiles)
+    else:
+        targets = [state.active_profile] if state.active_profile in profiles else []
+
+    removed: list[str] = []
+    for name in targets:
+        # Every name in `targets` was present in the map — `targets` is either
+        # the map's own keys or a membership-checked single name — so the pop
+        # always has something to remove and the name is always reportable. A
+        # profile stored as an explicit null has no entry to lose but is gone
+        # from the map all the same, which is the outcome asked for either way.
+        profiles.pop(name, None)
+        removed.append(name)
+
+    # A pointer still naming a profile that is not in the map — whether this run
+    # just deleted it or it was already gone — would send the next command
+    # straight to a name with nothing behind it. `--purge` is the moment the
+    # operator asked for the profile to stop existing, so clean it up here too.
+    pointer = config_data.get("active_profile")
+    dangling = pointer is not None and pointer not in profiles
+
+    if not removed and not dangling:
+        return []
+
+    config_data["profiles"] = profiles
+    config_data["version"] = 1
+    if dangling:
+        config_data.pop("active_profile", None)
+    _write_json(state.config_path, config_data)
+    return removed
 
 
 def file_mode(path: str | Path) -> int | None:
