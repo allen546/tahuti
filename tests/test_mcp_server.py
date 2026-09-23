@@ -36,6 +36,7 @@ from tahuti.mcp_server import (
     _sanitize_error,
     delete_submission,
     get_calendar_events,
+    get_class_grades,
     get_ical_feed,
     get_notifications,
     get_teacher_feedback,
@@ -926,6 +927,35 @@ class TestListClassesTool:
         mock_client.get_classes.return_value = {"300": "Physics (empty)"}
         data = json.loads(list_classes())
         assert [c["name"] for c in data["classes"]] == ["Physics (empty)"]
+
+
+class TestGetClassGradesTool:
+    """Tests for the get_class_grades MCP tool."""
+
+    def test_invalid_class_id(self):
+        result = json.loads(get_class_grades("not-a-number"))
+        assert "error" in result
+        assert "class_id must be a numeric ManageBac id" in result["error"]
+
+    def test_get_class_grades_success(self, mock_build_client):
+        mock, mock_client = mock_build_client
+        mock_client.get_classes.return_value = {"100": "Math"}
+        mock_client.get_class_grades.return_value = {
+            "class_id": "100",
+            "class_name": "Math",
+            "overall": {"mark": "A", "score": 95.0},
+            "grade_composition": [
+                {"category": "HW", "weight": 0.5, "mark": "A", "score": 95.0}
+            ],
+            "grade_scale": {"5": "A"},
+        }
+        res = json.loads(get_class_grades("100"))
+        assert res["class_id"] == "100"
+        assert res["class_name"] == "Math"
+        assert res["overall"]["mark"] == "A"
+        assert len(res["grade_composition"]) == 1
+        mock_client.get_class_grades.assert_called_once_with("100", class_name="Math")
+
 
 
 

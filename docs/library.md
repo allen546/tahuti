@@ -159,23 +159,26 @@ print(client.student_name)   # Automatically captured from DOM on first authenti
 ### 4.1 Crawl All Tasks
 
 ```python
-# Fetch both upcoming and completed coursework
+# Fetch upcoming, past, and overdue coursework, plus class grades and notifications
 overview = client.crawl_all(
     fetch_details=True,               # Fetch deep task descriptions, rubrics & attachments
-    views=["upcoming", "completed"],  # Filter views
+    fetch_notifications=True,         # Include MNN hub notification stats and items
     max_pages=10,                     # Max pagination depth
 )
 
 upcoming_tasks = overview.get("upcoming", [])
-completed_tasks = overview.get("completed", [])
+past_tasks = overview.get("past", [])
+overdue_tasks = overview.get("overdue", [])
+class_grades = overview.get("class_grades", {})
 ```
 
 ### 4.2 Fetch Tasks by View
 
 ```python
-# Query a specific view directly
+# Query a specific view directly ("upcoming", "past", or "overdue")
 upcoming = client.get_tasks_by_view(view="upcoming", max_pages=5)
-completed = client.get_tasks_by_view(view="completed", max_pages=5)
+past = client.get_tasks_by_view(view="past", max_pages=5)
+overdue = client.get_tasks_by_view(view="overdue", max_pages=5)
 ```
 
 ### 4.3 Deep Task Detail
@@ -264,19 +267,26 @@ print("Annotations:", feedback.get("annotations"))
 print("Rubric Grades:", feedback.get("rubric_evaluation"))
 ```
 
-### 6.2 Class Grades & Projected Scores
+### 6.2 Class Grades & Grade Composition
 
 ```python
 # Get class roster
-classes = client.get_classes()  # Returns dict: { "1000023": "English Language Arts", ... }
+classes = client.get_classes()  # Returns dict: { "11516148": "AP Calculus BC", ... }
 
-# Get detailed gradebook and expected final grade for one class
-grades_data = client.get_class_grades(class_id="1000023")
-print("Expected Grade:", grades_data.get("expected_grade"))
-print("Graded Tasks Count:", len(grades_data.get("graded_tasks", [])))
+# Get official overall grade, category weighting composition, and grading scale for a class
+grades_data = client.get_class_grades(class_id="11516148")
+print("Class:", grades_data.get("class_name"))
+print("Overall Mark:", grades_data["overall"]["mark"])       # e.g. "B"
+print("Overall Score:", grades_data["overall"]["score"])     # e.g. 81.67
+print("Grading Scale:", grades_data.get("grade_scale"))     # e.g. {"5": "A", "4": "B", ...}
 
-for task in grades_data.get("graded_tasks", []):
-    print(f"- {task['title']}: {task['score']} ({task['percentage']}%)")
+for cat in grades_data.get("grade_composition", []):
+    print(f"- {cat['category']} ({cat['weight'] * 100:.0f}%): {cat['mark']} ({cat['score']}%)")
+
+# Fetch grades across all enrolled classes
+all_grades = client.get_all_grades()
+for c in all_grades.get("classes", []):
+    print(f"{c['class_name']}: {c['overall']['mark']} ({c['overall']['score']}%)")
 ```
 
 ---

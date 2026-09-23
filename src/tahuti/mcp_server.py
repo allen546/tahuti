@@ -12,19 +12,16 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from .auth import build_client, hub_client
-from .client import task_id_from_target
-from .config import own_state_refusal
-from .filters import InvalidViewError, normalize_view, result_views, summary_of
-from .exceptions import CommandError
-from .client import parse_task_url
+from .client import parse_task_url, task_id_from_target
 from .config import own_state_refusal, snapshot_path
-from .filters import InvalidViewError, normalize_view, result_views
+from .exceptions import CommandError
 from .filters import (
     InvalidViewError,
     filter_result_by_status,
     filter_result_by_subject,
     normalize_view,
     result_views,
+    summary_of,
 )
 from .notifications import MNNHubClient
 
@@ -34,8 +31,8 @@ mcp = FastMCP(
     "tahuti",
     instructions=(
         "ManageBac MCP server. Provides tools to interact with ManageBac: "
-        "list/view tasks, submit files, view notifications, calendar events, "
-        "and timetables."
+        "list/view tasks, inspect enrolled classes and grade composition, "
+        "submit files, view notifications, calendar events, and timetables."
     ),
 )
 
@@ -932,7 +929,7 @@ def list_classes(
     verify_tls: bool = True,
     retry: int = 3,
 ) -> str:
-    """List all classes for the current student with their IDs.
+    """List all classes for the current student with their IDs and current overall grades.
 
     Args:
         school: School subdomain
@@ -950,14 +947,65 @@ def list_classes(
         verify=verify_tls,
         retry=retry,
     )
-    # The roster `crawl_all` itself uses to discover classes: the dashboard
-    # scrape (`client.get_classes`). Deriving it from task links instead — which
-    # silently drops every class with no tasks, because an empty class contributes no
-    # link to parse. It also cost a full crawl (dashboard, every class page and
-    # the notification hub) to answer a question the dashboard already answers.
-    classes_map = client.get_classes()
-    classes = [{"id": cid, "name": cname} for cid, cname in classes_map.items()]
+    try:
+        classes_map = client.get_classes()
+    except Exception as exc:
+        return _error_payload(exc)
+
+    classes = []
+    for cid, cname in classes_map.items():
+        entry = {"id": str(cid), "name": cname}
+        try:
+            grade_data = client.get_class_grades(cid, class_name=cname)
+            if isinstance(grade_data, dict) and "overall" in grade_data:
+                entry["overall"] = grade_data["overall"]
+        except Exception:
+            pass
+        classes.append(entry)
     return json.dumps({"classes": classes}, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def get_class_grades(
+    class_id: str,
+    school: str | None = None,
+    domain: str | None = None,
+    cookie: str | None = None,
+    profile: str | None = None,
+    verify_tls: bool = True,
+    retry: int = 3,
+) -> str:
+    """Get grade details, grade composition, and grading scale for a specific class.
+
+    Args:
+        class_id: Numeric class ID (e.g. "11516148")
+        school: School subdomain
+        domain: Base domain
+        cookie: Session cookie override
+        profile: Profile name
+        verify_tls: Set to False to disable TLS certificate verification
+        retry: Max retries with exponential backoff (default 3, 0=off)
+    """
+    try:
+        cid = _require_numeric_id(class_id, "class_id", "11516148")
+    except InvalidToolInput as exc:
+        return _invalid_input(exc)
+
+    _state, client, _email = build_client(
+        school=school,
+        domain=domain,
+        cookie=cookie,
+        profile=profile,
+        verify=verify_tls,
+        retry=retry,
+    )
+    try:
+        classes_map = client.get_classes()
+        class_name = classes_map.get(cid)
+        grade_data = client.get_class_grades(cid, class_name=class_name)
+    except Exception as exc:
+        return _error_payload(exc)
+    return json.dumps(grade_data, indent=2, ensure_ascii=False)
 
 
 # ── Entry point ─────────────────────────────────────────────────────────

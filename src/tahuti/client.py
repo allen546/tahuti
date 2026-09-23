@@ -545,6 +545,91 @@ _NAV_CLASS_LABELS = frozenset(
 )
 
 
+def _parse_task_category_averages(soup) -> dict:
+    """Extract official overall grade, category weights, and scale from #sidebar_info."""
+    overall = {"mark": "-", "score": None}
+    categories: list[dict] = []
+    grade_scale: dict[str, str] = {}
+
+    if not soup:
+        return {
+            "overall": overall,
+            "grade_composition": categories,
+            "grade_scale": grade_scale,
+        }
+
+    avg_h = soup.find(lambda t: t.name in ("h4", "h5", "h6") and "Task Category Averages" in t.get_text())
+    if avg_h:
+        container = avg_h.find_parent("section") or avg_h.find_parent("div")
+        if container:
+            items_list = container.find("div", class_="sidebar-items-list") or container
+            for row in items_list.find_all("div", class_="list-item"):
+                if "list-item-head" in row.get("class", []):
+                    continue
+                cells = row.find_all("div", class_="cell")
+                if len(cells) < 2:
+                    continue
+                c0 = cells[0].get_text(" ", strip=True)
+                c1 = cells[1].get_text(" ", strip=True)
+
+                if "Overall" in c0:
+                    m = re.search(r"([A-Za-z0-9+-]+)\s*\(([\d]+(?:\.[\d]+)?)%\)", c1)
+                    if m:
+                        overall = {"mark": m.group(1), "score": float(m.group(2))}
+                    else:
+                        m_score = re.search(r"\(([\d]+(?:\.[\d]+)?)%\)", c1) or re.search(r"^([\d]+(?:\.[\d]+)?)%$", c1.strip())
+                        if m_score:
+                            overall = {"mark": "-", "score": float(m_score.group(1))}
+                        elif c1 and c1 != "-":
+                            overall = {"mark": c1, "score": None}
+                else:
+                    m = re.match(r"^(.*?)\s*\((\d+(?:\.\d+)?)%\)$", c0)
+                    if m:
+                        cat_name = m.group(1).strip()
+                        cat_weight = float(m.group(2)) / 100.0
+                    else:
+                        cat_name = c0
+                        cat_weight = 0.0
+
+                    m1 = re.search(r"([A-Za-z0-9+-]+)\s*\(([\d]+(?:\.[\d]+)?)%\)", c1)
+                    if m1:
+                        cat_mark = m1.group(1)
+                        cat_score = float(m1.group(2))
+                    else:
+                        m1_score = re.search(r"\(([\d]+(?:\.[\d]+)?)%\)", c1) or re.search(r"^([\d]+(?:\.[\d]+)?)%$", c1.strip())
+                        if m1_score:
+                            cat_mark = "-"
+                            cat_score = float(m1_score.group(1))
+                        elif c1 and c1 != "-":
+                            cat_mark = c1
+                            cat_score = None
+                        else:
+                            cat_mark = "-"
+                            cat_score = None
+
+                    categories.append({
+                        "category": cat_name,
+                        "weight": cat_weight,
+                        "mark": cat_mark,
+                        "score": cat_score,
+                    })
+
+    chart = soup.find("div", class_="assignments-progress-chart")
+    if chart and chart.get("data-grade-labels"):
+        try:
+            labels_map = json.loads(chart["data-grade-labels"])
+            if isinstance(labels_map, dict):
+                grade_scale = {str(k): str(v) for k, v in labels_map.items()}
+        except Exception:
+            pass
+
+    return {
+        "overall": overall,
+        "grade_composition": categories,
+        "grade_scale": grade_scale,
+    }
+
+
 class ManageBacClient:
     """HTTP client for ManageBac with session-based auth.
 
@@ -2122,9 +2207,9 @@ class ManageBacClient:
 
     # ── Class grades ────────────────────────────────────────────────────
 
-    def get_classes(self) -> dict[str, str]:
+    def get_classes(self, bypass_cache: bool = False) -> dict[str, str]:
         """Fetch dashboard and extract all class IDs and class names."""
-        soup = self._get("/student/dashboard")
+        soup = self._get("/student/dashboard", bypass_cache=bypass_cache)
         seen: dict[str, str] = {}
         for a in soup.find_all("a", href=True):
             href = a["href"]
@@ -2135,6 +2220,48 @@ class ManageBacClient:
                 if name and name.lower() not in _NAV_CLASS_LABELS:
                     seen[class_id] = name
         return seen
+
+    def get_class_grades(
+        self,
+        class_id: str,
+        class_name: str | None = None,
+        bypass_cache: bool = False,
+    ) -> dict:
+        """Fetch official gradebook, overall grade, and category breakdown for a class."""
+        soup = self._get(f"/student/classes/{class_id}/core_tasks", bypass_cache=bypass_cache)
+        info = _parse_task_category_averages(soup)
+
+        if not class_name:
+            h1 = soup.find("h1") if soup else None
+            h1_text = h1.get_text(" ", strip=True) if h1 else ""
+            if h1_text:
+                class_name = h1_text
+            else:
+                class_name = f"Class {class_id}"
+
+        assessed = [c for c in info["grade_composition"] if c.get("score") is not None]
+
+        return {
+            "class_id": str(class_id),
+            "class_name": class_name,
+            "overall": info["overall"],
+            "grade_composition": info["grade_composition"],
+            "grade_scale": info["grade_scale"],
+            "categories_count": len(info["grade_composition"]),
+            "assessed_categories_count": len(assessed),
+        }
+
+    def get_all_grades(self, bypass_cache: bool = False) -> dict:
+        """Fetch grades and category breakdowns across all enrolled classes."""
+        classes = self.get_classes(bypass_cache=bypass_cache)
+        results = []
+        for class_id, class_name in classes.items():
+            try:
+                g = self.get_class_grades(class_id, class_name=class_name, bypass_cache=bypass_cache)
+                results.append(g)
+            except Exception as e:
+                log.warning("Failed to fetch grades for class %s (%s): %s", class_id, class_name, e)
+        return {"classes": results}
 
     # ── Public crawl methods ────────────────────────────────────────────
 
@@ -2416,14 +2543,12 @@ class ManageBacClient:
             "notifications": notifications,
         }
 
-    def get_class_tasks(
+    def _parse_tasks_from_soup(
         self,
+        soup,
         class_id: str,
         class_name: str | None = None,
-        bypass_cache: bool = False,
     ) -> list[dict]:
-        """Fetch and reconstruct all tasks for a specific class."""
-        soup = self._get(f"/student/classes/{class_id}/core_tasks", bypass_cache=bypass_cache)
         tasks: list[dict] = []
         for card in soup.find_all("div", class_="fusion-card-item"):
             title_el = card.find(class_="title")
@@ -2553,6 +2678,16 @@ class ManageBacClient:
             tasks.append(reconstructed_task)
         return tasks
 
+    def get_class_tasks(
+        self,
+        class_id: str,
+        class_name: str | None = None,
+        bypass_cache: bool = False,
+    ) -> list[dict]:
+        """Fetch and reconstruct all tasks for a specific class."""
+        soup = self._get(f"/student/classes/{class_id}/core_tasks", bypass_cache=bypass_cache)
+        return self._parse_tasks_from_soup(soup, class_id, class_name=class_name)
+
     def crawl_all(
         self,
         max_pages: int = 10,
@@ -2586,6 +2721,8 @@ class ManageBacClient:
         upcoming = []
         past = []
         overdue = []
+        classes_data = []
+        class_grades_map = {}
 
         if not classes:
             log.warning("No classes found. Falling back to paginated dashboard crawling...")
@@ -2596,8 +2733,23 @@ class ManageBacClient:
             log.info("Fetching tasks from %d classes...", len(classes))
             for class_id, class_name in classes.items():
                 try:
-                    tasks = self.get_class_tasks(class_id, class_name=class_name, bypass_cache=False)
+                    soup = self._get(f"/student/classes/{class_id}/core_tasks", bypass_cache=False)
+                    grades_info = _parse_task_category_averages(soup)
+                    c_info = {
+                        "id": str(class_id),
+                        "name": class_name,
+                        "class_id": str(class_id),
+                        "class_name": class_name,
+                        "overall": grades_info.get("overall", {"mark": "-", "score": None}),
+                        "grade_composition": grades_info.get("grade_composition", []),
+                        "grade_scale": grades_info.get("grade_scale", {}),
+                    }
+                    class_grades_map[str(class_id)] = c_info
+                    classes_data.append(c_info)
+
+                    tasks = self._parse_tasks_from_soup(soup, class_id, class_name=class_name)
                     for reconstructed_task in tasks:
+                        reconstructed_task["class_overall"] = c_info["overall"]
                         view = reconstructed_task.get("view")
                         if view == "upcoming":
                             upcoming.append(reconstructed_task)
@@ -2636,6 +2788,8 @@ class ManageBacClient:
             "school": self.school,
             "base_url": self.base,
             "crawled_at": datetime.now().isoformat(),
+            "classes": classes_data,
+            "class_grades": class_grades_map,
             "upcoming": upcoming,
             "past": past,
             "overdue": overdue,

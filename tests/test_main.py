@@ -48,6 +48,8 @@ class TestBuildParser:
             "calendar",
             "timetable",
             "feedback",
+            "class",
+            "grades",
         }
         assert set(choices.keys()) == expected
 

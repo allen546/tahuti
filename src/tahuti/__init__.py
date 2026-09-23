@@ -1,6 +1,6 @@
 """ManageBac Task Crawler — fetch tasks, grades, submissions & more."""
 
-__version__ = "0.4.3"
+__version__ = "0.5.0"
 
 from .client import ManageBacClient
 from .daemon.events import MBEvent

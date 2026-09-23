@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Dates for `0.3.0` and earlier are derived from git history (those releases were
 never tagged); from `0.4.0` on, a date is the date of its `vX.Y.Z` git tag.
 
+## [0.5.0] - 2026-09-23
+
+### Added
+- **Official gradebook extraction and composition.** ManageBac exposes server-calculated overall letter grades, scores, category weights, and grading scales in `#sidebar_info` on the class core tasks page. Extracted automatically during crawls without additional network requests.
+- **Dedicated `class` and `grades` CLI commands.**
+  - `mb class [list]` and `mb grades`: overview scoreboard of all enrolled classes with overall marks, scores, and category completion ratios.
+  - `mb class <id|name>` / `mb class view <id|name>`: class metadata, overall grade, category composition breakdown table, and grading scale (strictly omitting task listings to preserve separation of concerns).
+  - `mb grades -s <query>`: view class grade composition filtered by subject name.
+  - `mb grades --composition` (`-C`): multi-class category weight and mark breakdown.
+- **Overall grades in task list headers.** `mb list` headers now display overall grade standing alongside class names (e.g. `=== AP Calculus BC [B (81.67%)] ===`).
+- **Enriched MCP server tools.** `list_classes` includes overall marks/scores, and new `get_class_grades` tool provides the canonical gradebook data model.
+
+### Removed
+- **Removed `tahuti download` subcommand.** Tasks, attachments, and submissions are accessed directly via `tahuti view` and `tahuti submit`.
+
 ## [0.4.3] - 2026-09-19
 
 ### Fixed

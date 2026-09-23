@@ -145,7 +145,7 @@ class TestCachedReplay:
         """Replay /student/classes/<id>/core_tasks: verify count, IDs, titles, due dates, statuses."""
         # Class 11516148 (Calculus)
         tasks = harness.client.get_class_tasks("11516148", "AP Calculus BC")
-        assert len(tasks) == 6, f"Expected 6 tasks for class 11516148, got {len(tasks)}"
+        assert len(tasks) == 7, f"Expected 7 tasks for class 11516148, got {len(tasks)}"
 
         statuses = set()
         views = set()
@@ -267,4 +267,158 @@ class TestCachedReplay:
             # Timestamp format YYYYMMDDTHHMMSS
             assert re.match(r"^\d{8}T\d{6}$", ev["DTSTART"]), f"Bad start timestamp: {ev['DTSTART']}"
             assert re.match(r"^\d{8}T\d{6}$", ev["DTEND"]), f"Bad end timestamp: {ev['DTEND']}"
+
+    def test_get_class_grades_calculus(self, harness: OfflineClientHarness):
+        """Replay /student/classes/11516148/core_tasks: parse overall grade, weights, and scale."""
+        grades = harness.client.get_class_grades("11516148", "AP Calculus BC")
+        assert grades["class_id"] == "11516148"
+        assert grades["class_name"] == "AP Calculus BC"
+        assert grades["overall"]["mark"] == "B"
+        assert grades["overall"]["score"] == 81.67
+        assert grades["categories_count"] == 5
+        assert grades["assessed_categories_count"] == 2
+
+        categories = {c["category"]: c for c in grades["grade_composition"]}
+        assert "Homework" in categories
+        assert categories["Homework"]["weight"] == 0.25
+        assert categories["Homework"]["mark"] == "A"
+        assert categories["Homework"]["score"] == 91.8
+        assert "test" in categories
+        assert categories["test"]["weight"] == 0.2
+        assert "Class Attendance" in categories
+        assert categories["Class Attendance"]["weight"] == 0.05
+
+        # Check grading scale
+        scale = grades["grade_scale"]
+        assert scale.get("5") == "A"
+        assert scale.get("4") == "B"
+        assert scale.get("1") == "F"
+
+    def test_get_class_grades_unassessed(self, harness: OfflineClientHarness):
+        """Replay unassessed class (11516058): verify empty/pending overall grade."""
+        grades = harness.client.get_class_grades("11516058")
+        assert grades["class_id"] == "11516058"
+        assert grades["overall"]["mark"] == "-"
+        assert grades["overall"]["score"] is None
+
+    def test_get_all_grades(self, harness: OfflineClientHarness):
+        """Fetch all grades across roster: verify all classes aggregated."""
+        all_grades = harness.client.get_all_grades()
+        assert "classes" in all_grades
+        classes = all_grades["classes"]
+        assert len(classes) >= 5
+        cid_set = {c["class_id"] for c in classes}
+        assert "11516148" in cid_set
+        for c in classes:
+            assert "class_id" in c
+            assert "class_name" in c
+            assert "overall" in c
+            assert "grade_composition" in c
+            assert "grade_scale" in c
+
+    def test_crawl_all_grade_enrichment(self, harness: OfflineClientHarness):
+        """crawl_all() parses grades in single pass and enriches envelope & tasks."""
+        result = harness.client.crawl_all(fetch_notifications=False, fetch_details=False)
+        assert "classes" in result
+        assert "class_grades" in result
+        assert "11516148" in result["class_grades"]
+        calc_grade = result["class_grades"]["11516148"]
+        assert calc_grade["overall"]["mark"] == "B"
+
+        calc_class = next(c for c in result["classes"] if c["id"] == "11516148")
+        calc_name = calc_class["name"]
+        calc_tasks = [t for t in result["upcoming"] + result["past"] + result["overdue"] if t.get("class_name") == calc_name or "Calculus" in t.get("class_name", "")]
+        assert len(calc_tasks) > 0
+        for t in calc_tasks:
+            assert "class_overall" in t
+            assert t["class_overall"]["mark"] == "B"
+            assert t["class_overall"]["score"] == 81.67
+
+    def test_class_and_grades_formatters(self, harness: OfflineClientHarness):
+        """Formatters render clean tables and metadata; class.view NEVER lists tasks."""
+        from tahuti.formatters import render_pretty
+
+        calc_grades = harness.client.get_class_grades("11516148", "AP Calculus BC")
+        all_grades = harness.client.get_all_grades()
+
+        # 1. class.list / grades.all
+        rendered_list = render_pretty({"ok": True, "command": "class.list", "profile": "default", "data": all_grades})
+        assert "ID" in rendered_list
+        assert "Class" in rendered_list
+        assert "Overall Mark" in rendered_list
+        assert "Calculus" in rendered_list
+        assert "81.67%" in rendered_list
+
+        # 2. class.view (must NOT include task list)
+        rendered_view = render_pretty({"ok": True, "command": "class.view", "profile": "default", "data": calc_grades})
+        assert "AP Calculus BC" in rendered_view
+        assert "Overall Grade:" in rendered_view
+        assert "B (81.67%)" in rendered_view
+        assert "[Grade Composition]" in rendered_view
+        assert "[Grading Scale]" in rendered_view
+        # Ensure task details or task list headers are strictly absent
+        assert "Upcoming Tasks" not in rendered_view
+        assert "Past Tasks" not in rendered_view
+        assert "Overdue Tasks" not in rendered_view
+        assert "core_tasks" not in rendered_view
+
+        # 3. grades.composition
+        rendered_comp = render_pretty({"ok": True, "command": "grades.composition", "profile": "default", "data": all_grades})
+        assert "Grade Composition Across All Classes" in rendered_comp
+        assert "Calculus" in rendered_comp
+        assert "Overall: B (81.67%)" in rendered_comp
+
+        # 4. list command headers with overall grade
+        list_result = harness.client.crawl_all(fetch_notifications=False, fetch_details=False)
+        list_payload = {
+            "ok": True,
+            "command": "list",
+            "profile": "default",
+            "data": {
+                "meta": {
+                    "student_name": list_result.get("student_name"),
+                    "school": list_result.get("school"),
+                    "view": "all",
+                },
+                "summary": list_result.get("summary"),
+                "tasks": {
+                    "upcoming": list_result.get("upcoming"),
+                    "past": list_result.get("past"),
+                    "overdue": list_result.get("overdue"),
+                },
+            },
+        }
+        rendered_tasks = render_pretty(list_payload)
+        assert "[B (81.67%)]" in rendered_tasks
+
+    def test_mcp_class_tools(self, monkeypatch, harness: OfflineClientHarness):
+        """MCP list_classes includes overall grades; get_class_grades returns canonical model."""
+        import json
+        from tahuti import mcp_server
+
+        monkeypatch.setattr(
+            mcp_server,
+            "build_client",
+            lambda **kwargs: (None, harness.client, "test@example.com"),
+        )
+
+        # list_classes
+        res_classes_raw = mcp_server.list_classes()
+        res_classes = json.loads(res_classes_raw)
+        assert "classes" in res_classes
+        calc = next((c for c in res_classes["classes"] if c["id"] == "11516148"), None)
+        assert calc is not None
+        assert "Calculus" in calc["name"]
+        assert calc["overall"]["mark"] == "B"
+        assert calc["overall"]["score"] == 81.67
+
+        # get_class_grades
+        res_grades_raw = mcp_server.get_class_grades("11516148")
+        res_grades = json.loads(res_grades_raw)
+        assert res_grades["class_id"] == "11516148"
+        assert res_grades["overall"]["mark"] == "B"
+        assert len(res_grades["grade_composition"]) == 5
+        assert res_grades["grade_scale"].get("5") == "A"
+
+
 

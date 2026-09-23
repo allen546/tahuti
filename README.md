@@ -12,11 +12,11 @@ Supports both international (`managebac.com`) and China (`managebac.cn`) instanc
    - Authenticate seamlessly via credentials or saved session cookies (`ManageBacClient.from_config()`).
    - Programmatic access to tasks, submissions, calendar feeds, weekly timetables, and MNN notifications.
    - Clean separation of concerns: produces pure, typed data with zero vendor-specific assumptions or hardcoded push rules.
-2. **Interactive CLI** (`tahuti login`, `tahuti list`, `tahuti view`, `tahuti submit`, `tahuti daemon`):
-   - Fast terminal workflows for everyday student tasks: listing assignments, viewing details, uploading files, checking schedules, and managing background daemons.
+2. **Interactive CLI** (`tahuti login`, `tahuti list`, `tahuti view`, `tahuti class`, `tahuti grades`, `tahuti submit`, `tahuti daemon`):
+   - Fast terminal workflows for everyday student tasks: listing assignments, checking overall grades and category weights, viewing details, uploading files, checking schedules, and managing background daemons.
    - Smart output formatting: human-friendly colored tables on interactive TTYs, structured JSON when piped to files or other tools (`jq`).
 3. **MCP Server for AI Coding Assistants**:
-   - Built-in Model Context Protocol server (`tahuti-mcp`) with 12 tools for AI assistants like Claude Desktop, Gemini, and Cursor to inspect deadlines and coursework.
+   - Built-in Model Context Protocol server (`tahuti-mcp`) with 13 tools for AI assistants like Claude Desktop, Gemini, and Cursor to inspect deadlines, grades, and coursework.
 4. **Event Streaming & Webhook Engine**:
    - In-process async event streaming (`async for event in daemon.stream()`) for Python bots and background tasks.
    - Background daemon service (`tahuti daemon run --webhook-url ...`) dispatching typed `MBEvent` payloads to HTTP webhooks with HMAC-SHA256 signatures, exponential backoff retries, stealth jitter, and active-hours scheduling.
@@ -271,20 +271,17 @@ tahuti view 1000025                    # view single task by ID
 tahuti view 1000025 --feedback         # view single task with teacher feedback inline
 tahuti view "https://your-school.managebac.com/student/classes/1000024/core_tasks/1000025"
 
-# File Submission & Downloads
-tahuti submit 1000026 homework.pdf     # upload file to assignment dropbox
-tahuti download 1000026                # download every attachment + submission for a task
-tahuti download 1000026 --no-attachments --output-dir ./math  # student submissions only
-tahuti download 1000026 --pages 5      # search 5 pages server-side when the task is not in snapshot.json
-tahuti feedback 1000026                # fetch teacher feedback for a submitted task
+# Classes & Grade Composition
+tahuti class                            # overview table of all enrolled classes & overall grades
+tahuti class calc                       # class metadata, overall grade, category weights & scale
+tahuti class view 11516148              # view class grade composition by numeric ID
+tahuti grades                           # grades scoreboard across all enrolled classes
+tahuti grades -s "Calculus"             # view grade composition for a specific subject
+tahuti grades --composition             # full category breakdown across all enrolled classes
 
-> **`tahuti download` reports what it wrote.** Every run ends in one payload:
-> `downloaded` and `failed` lists with `downloaded_count` / `failed_count`, the
-> resolved `output_dir`, and the task title. A partial failure is still a success
-> — exit 0 as long as at least one file landed — and exit 1 means nothing landed,
-> or the task could not be resolved at all (`task_not_found`, `no_task_link`,
-> `detail_fetch_failed`). Without `--output-dir` the files land in
-> `./task_<id>_<slug>/` under the current directory.
+# File Submission & Teacher Feedback
+tahuti submit 1000026 homework.pdf     # upload file to assignment dropbox
+tahuti feedback 1000026                # fetch teacher feedback for a submitted task
 
 # Notifications & Feed
 tahuti notifications                    # list MNN notifications (page 1)
@@ -481,7 +478,7 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-The MCP server exposes 12 tools: `list_tasks`, `view_task`, `submit_file`, `delete_submission`, `get_teacher_feedback`, `get_notifications`, `mark_notification`, `mark_all_notifications_read`, `get_calendar_events`, `get_ical_feed`, `get_timetable`, and `list_classes`.
+The MCP server exposes 13 tools: `list_tasks`, `view_task`, `submit_file`, `delete_submission`, `get_teacher_feedback`, `get_notifications`, `mark_notification`, `mark_all_notifications_read`, `get_calendar_events`, `get_ical_feed`, `get_timetable`, `list_classes`, and `get_class_grades`.
 
 ---
 

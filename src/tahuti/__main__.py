@@ -1672,6 +1672,103 @@ def cmd_feedback(args) -> int:
     return 0
 
 
+def _resolve_class_id(classes_map: dict[str, str], query: str | None) -> tuple[str | None, str | None]:
+    """Resolve (class_id, class_name) from exact id or fuzzy name match."""
+    if not query:
+        return None, None
+    query_str = str(query).strip()
+    if query_str.isdigit():
+        if query_str in classes_map:
+            return query_str, classes_map[query_str]
+        return query_str, None
+    query_lower = query_str.lower()
+    for cid, cname in classes_map.items():
+        if query_lower in cname.lower():
+            return cid, cname
+    return None, None
+
+
+def cmd_class(args) -> int:
+    """List all enrolled classes or inspect a specific class's metadata and grade composition."""
+    state, client, email = _build_client(args, "class")
+    _authenticate_client(state, client, email)
+    bypass_cache = getattr(args, "refresh", False) or getattr(args, "fresh", False)
+
+    classes_map = client.get_classes(bypass_cache=bypass_cache)
+    if not classes_map:
+        payload = error("class", "no_classes", "No classes found")
+        print_payload(payload, args.output, args.format)
+        return 1
+
+    query = args.subject or getattr(args, "class_id", None)
+    target = getattr(args, "target", None)
+    class_arg = getattr(args, "class_arg", None)
+
+    if target == "view":
+        query = query or class_arg
+        if not query:
+            payload = error("class.view", "missing_argument", "Provide a class ID or subject name to view")
+            print_payload(payload, args.output, args.format)
+            return 1
+    elif target and target not in ("list", "all"):
+        query = query or target
+
+    if query and query not in ("list", "all"):
+        cid, cname = _resolve_class_id(classes_map, query)
+        if not cid:
+            payload = error("class.view", "class_not_found", f"No class matching '{query}'")
+            print_payload(payload, args.output, args.format)
+            return 1
+
+        grade_data = client.get_class_grades(cid, class_name=cname, bypass_cache=bypass_cache)
+        payload = ok("class.view", state.active_profile, grade_data)
+        print_payload(payload, args.output, args.format)
+        return 0
+
+    all_grades = client.get_all_grades(bypass_cache=bypass_cache)
+    payload = ok("class.list", state.active_profile, all_grades)
+    print_payload(payload, args.output, args.format)
+    return 0
+
+
+def cmd_grades(args) -> int:
+    """View overall grades scoreboard, class grade composition, or all-classes composition."""
+    state, client, email = _build_client(args, "grades")
+    _authenticate_client(state, client, email)
+    bypass_cache = getattr(args, "refresh", False) or getattr(args, "fresh", False)
+
+    classes_map = client.get_classes(bypass_cache=bypass_cache)
+    if not classes_map:
+        payload = error("grades", "no_classes", "No classes found")
+        print_payload(payload, args.output, args.format)
+        return 1
+
+    query = args.subject or getattr(args, "class_id", None) or getattr(args, "target", None)
+
+    if getattr(args, "composition", False) and not query:
+        all_grades = client.get_all_grades(bypass_cache=bypass_cache)
+        payload = ok("grades.composition", state.active_profile, all_grades)
+        print_payload(payload, args.output, args.format)
+        return 0
+
+    if query and query not in ("list", "all"):
+        cid, cname = _resolve_class_id(classes_map, query)
+        if not cid:
+            payload = error("grades", "class_not_found", f"No class matching '{query}'")
+            print_payload(payload, args.output, args.format)
+            return 1
+
+        grade_data = client.get_class_grades(cid, class_name=cname, bypass_cache=bypass_cache)
+        payload = ok("grades", state.active_profile, grade_data)
+        print_payload(payload, args.output, args.format)
+        return 0
+
+    all_grades = client.get_all_grades(bypass_cache=bypass_cache)
+    payload = ok("grades.all", state.active_profile, all_grades)
+    print_payload(payload, args.output, args.format)
+    return 0
+
+
 # ── CLI parser ──────────────────────────────────────────────────────────
 
 
@@ -2179,6 +2276,45 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max pages to search when resolving by id (default: 10)",
     )
     feedback_p.set_defaults(func=cmd_feedback)
+
+    class_p = subparsers.add_parser(
+        "class", help="View enrolled classes and grade composition"
+    )
+    add_common_auth_flags(class_p)
+    class_p.add_argument(
+        "target", nargs="?", help="Subcommand (list, view) or class ID/subject name"
+    )
+    class_p.add_argument(
+        "class_arg", nargs="?", help="Class ID or subject name (when using 'class view <name>')"
+    )
+    class_p.add_argument(
+        "--subject", "-s", help="Filter by subject/class name"
+    )
+    class_p.add_argument(
+        "--class-id", help="Filter by exact numeric class ID"
+    )
+    class_p.set_defaults(func=cmd_class)
+
+    grades_p = subparsers.add_parser(
+        "grades", help="View class grades and grade composition"
+    )
+    add_common_auth_flags(grades_p)
+    grades_p.add_argument(
+        "target", nargs="?", help="Subject name or class ID (optional)"
+    )
+    grades_p.add_argument(
+        "--subject", "-s", help="Filter by subject/class name"
+    )
+    grades_p.add_argument(
+        "--class-id", help="Filter by exact numeric class ID"
+    )
+    grades_p.add_argument(
+        "--composition",
+        "-C",
+        action="store_true",
+        help="Show grade composition breakdown across all classes",
+    )
+    grades_p.set_defaults(func=cmd_grades)
 
     return parser
 

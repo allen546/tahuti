@@ -201,10 +201,28 @@ def render_pretty(payload: dict) -> str:
                 grade_w = max((get_display_width(get_grade_display(t)) for t in class_tasks), default=0)
 
                 class_lines = []
+                overall_suffix = ""
+                class_overall = None
+                for t in class_tasks:
+                    if t.get("class_overall"):
+                        class_overall = t.get("class_overall")
+                        break
+                if class_overall:
+                    mark = class_overall.get("mark")
+                    score = class_overall.get("score")
+                    mark_part = mark if (mark and mark != "-") else ""
+                    score_part = f"{score:.2f}%" if score is not None else ""
+                    if mark_part and score_part:
+                        overall_suffix = f" [{mark_part} ({score_part})]"
+                    elif mark_part:
+                        overall_suffix = f" [{mark_part}]"
+                    elif score_part:
+                        overall_suffix = f" [{score_part}]"
+
                 if is_single_class:
-                    class_lines.append(f"\n{class_name}")
+                    class_lines.append(f"\n{class_name}{overall_suffix}")
                 else:
-                    class_lines.append(f"\n=== {class_name} ===")
+                    class_lines.append(f"\n=== {class_name}{overall_suffix} ===")
 
                 for task in class_tasks:
                     grade = get_grade_display(task)
@@ -411,6 +429,154 @@ def render_pretty(payload: dict) -> str:
         sorted_grades = sorted(grades.items(), key=lambda x: (-x[1], x[0]))
         for grade, count in sorted_grades:
             lines.append(f"  {grade:<20} {count:<5}")
+        return "\n".join(lines)
+
+    if command in ("class.list", "grades.all"):
+        classes = data.get("classes", [])
+        lines = [
+            "Classes Overview",
+            f"  profile: {profile}",
+            "",
+        ]
+        if not classes:
+            lines.append("  (no classes found)")
+            return "\n".join(lines)
+
+        max_name_w = max((get_display_width(c.get("name") or c.get("class_name") or "") for c in classes), default=20)
+        col_name_w = max(20, max_name_w)
+
+        lines.append(
+            f"  {'ID':<10} {pad_string('Class', col_name_w, 'left')} {'Overall Mark':<14} {'Score':<10} {'Assessed Categories'}"
+        )
+        lines.append("  " + "─" * (10 + 1 + col_name_w + 1 + 14 + 1 + 10 + 1 + 20))
+
+        for c in classes:
+            cid = str(c.get("id") or c.get("class_id") or "")
+            name = c.get("name") or c.get("class_name") or ""
+            overall = c.get("overall", {}) or {}
+            mark = overall.get("mark") or "-"
+            score = overall.get("score")
+            score_str = f"{score:.2f}%" if score is not None else "-"
+
+            comp = c.get("grade_composition") or []
+            tot_cats = len(comp) if comp else c.get("categories_count", 0)
+            assessed_cats = sum(1 for cat in comp if cat.get("score") is not None) if comp else c.get("assessed_categories_count", 0)
+            cats_str = f"{assessed_cats} / {tot_cats} categories" if tot_cats else "-"
+
+            name_col = pad_string(name, col_name_w, "left")
+            lines.append(
+                f"  {cid:<10} {name_col} {mark:<14} {score_str:<10} {cats_str}"
+            )
+        return "\n".join(lines)
+
+    if command in ("class.view", "grades"):
+        class_id = data.get("class_id") or data.get("id") or "?"
+        class_name = data.get("class_name") or data.get("name") or "Unknown Class"
+        overall = data.get("overall", {}) or {}
+        mark = overall.get("mark") or "-"
+        score = overall.get("score")
+        score_str = f" ({score:.2f}%)" if score is not None else ""
+
+        lines = [
+            f"{class_name} ({class_id})",
+            f"Overall Grade: {mark}{score_str}",
+            "",
+            "[Grade Composition]",
+        ]
+        composition = data.get("grade_composition") or []
+        if not composition:
+            lines.append("  (no category weighting information found)")
+        else:
+            cat_w = max((get_display_width(c.get("category") or "") for c in composition), default=12)
+            cat_w = max(cat_w, len("Assessed Total"), 12)
+
+            lines.append(
+                f"  {pad_string('Category', cat_w, 'left')}  {'Weight':>8}   {'Mark':<6} {'Score':>8}    {'Contribution':>12}"
+            )
+            lines.append("  " + "─" * (cat_w + 2 + 8 + 3 + 6 + 1 + 8 + 4 + 12))
+
+            total_weight = 0.0
+            assessed_weight = 0.0
+            weighted_points_sum = 0.0
+
+            for cat in composition:
+                cname = cat.get("category") or "Unknown"
+                w = cat.get("weight", 0.0) or 0.0
+                total_weight += w
+                c_mark = cat.get("mark") or "-"
+                c_score = cat.get("score")
+
+                w_pct_str = f"{w * 100:.1f}".rstrip("0").rstrip(".") + "%"
+                if c_score is not None:
+                    assessed_weight += w
+                    contribution = w * c_score
+                    weighted_points_sum += contribution
+                    score_cell = f"{c_score:.2f}%"
+                    contrib_cell = f"{contribution:.2f}%"
+                else:
+                    score_cell = "-"
+                    contrib_cell = "-"
+
+                lines.append(
+                    f"  {pad_string(cname, cat_w, 'left')}  {w_pct_str:>8}   {c_mark:<6} {score_cell:>8}    {contrib_cell:>12}"
+                )
+
+            lines.append("  " + "─" * (cat_w + 2 + 8 + 3 + 6 + 1 + 8 + 4 + 12))
+            assessed_w_str = f"{assessed_weight * 100:.1f}".rstrip("0").rstrip(".") + "%"
+            total_w_str = f"{total_weight * 100:.1f}".rstrip("0").rstrip(".") + "%"
+            overall_contrib = f"{weighted_points_sum:.2f}% / {assessed_w_str}" if assessed_weight > 0 else "-"
+            lines.append(
+                f"  {pad_string('Assessed Total', cat_w, 'left')}  {assessed_w_str:>8}   {mark:<6} {score_str.strip(' ()') or '-':>8}    {overall_contrib:>12}"
+            )
+
+        grade_scale = data.get("grade_scale") or {}
+        if grade_scale:
+            lines.append("\n[Grading Scale]")
+            scale_parts = []
+            for k in sorted(grade_scale.keys(), key=lambda x: int(x) if x.isdigit() else x, reverse=True):
+                lbl = grade_scale[k]
+                scale_parts.append(f"{lbl}: Level {k}")
+            lines.append("  " + "   ".join(scale_parts))
+
+        return "\n".join(lines)
+
+    if command == "grades.composition":
+        classes = data.get("classes", [])
+        lines = [
+            "Grade Composition Across All Classes",
+            f"  profile: {profile}",
+            "",
+        ]
+        if not classes:
+            lines.append("  (no classes found)")
+            return "\n".join(lines)
+
+        for c in classes:
+            cname = c.get("name") or c.get("class_name") or "Unknown Class"
+            overall = c.get("overall", {}) or {}
+            mark = overall.get("mark") or "-"
+            score = overall.get("score")
+            score_str = f" ({score:.2f}%)" if score is not None else ""
+            lines.append(f"{cname} [Overall: {mark}{score_str}]")
+
+            comp = c.get("grade_composition") or []
+            if not comp:
+                lines.append("  (no category weights configured)")
+            else:
+                for cat in comp:
+                    cat_name = cat.get("category") or "Unknown"
+                    w = cat.get("weight", 0.0) or 0.0
+                    w_str = f"{w * 100:.1f}".rstrip("0").rstrip(".") + "%"
+                    c_mark = cat.get("mark") or "-"
+                    c_score = cat.get("score")
+                    if c_score is not None:
+                        score_info = f"{c_mark} ({c_score:.2f}%)" if c_mark != "-" else f"{c_score:.2f}%"
+                    elif c_mark != "-":
+                        score_info = c_mark
+                    else:
+                        score_info = "-"
+                    lines.append(f"  • {cat_name} ({w_str}): {score_info}")
+            lines.append("")
         return "\n".join(lines)
 
     return json.dumps(payload, indent=2, ensure_ascii=False)
