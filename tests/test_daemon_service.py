@@ -105,14 +105,14 @@ def test_daemon_service_on_start_default(tmp_path: Path):
     mock_client = MagicMock()
     # Pre-populate state manager with an existing task
     state_mgr = DaemonStateManager(tmp_path / "state.json")
-    state_mgr.update_task({"id": "111", "title": "Old Task", "due_date": "2026-09-10 10:00:00"})
+    state_mgr.update_task({"id": "111", "title": "Old Task", "due_date": "2099-09-10 10:00:00"})
 
     # Setup upcoming task return and terminate loop
     def _upcoming(view, max_pages=3):
         service._running = False
         return [
-            {"id": "111", "title": "Old Task Updated", "due_date": "2026-09-10 12:00:00"},
-            {"id": "222", "title": "Brand New Task", "due_date": "2026-09-12 15:00:00"},
+            {"id": "111", "title": "Old Task Updated", "due_date": "2099-09-10 12:00:00"},
+            {"id": "222", "title": "Brand New Task", "due_date": "2099-09-12 15:00:00"},
         ]
 
     mock_client.get_tasks_by_view.side_effect = _upcoming

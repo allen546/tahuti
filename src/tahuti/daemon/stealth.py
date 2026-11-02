@@ -69,7 +69,7 @@ class StealthTaskCrawler:
         # Parse task title
         title = ""
         # 3a. Primary: .fusion-card-item .title (e.g. <div class="h4 title">)
-        card = soup.find(class_="fusion-card-item")
+        card = soup.find(class_=("short-assignment", "fusion-card-item"))
         if card:
             title_node = card.find(class_=re.compile(r"\btitle\b"))
             if title_node:
@@ -145,7 +145,7 @@ class StealthTaskCrawler:
         grade_letter = None
         grade_score = None
         _noise = ("submitted", "pending", "task", "due", "not")
-        card = soup.find(class_="fusion-card-item")
+        card = soup.find(class_=("short-assignment", "fusion-card-item"))
         if card:
             grade_el = card.find(class_=re.compile(r"\bgrade\b"))
             if grade_el:

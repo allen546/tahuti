@@ -7,10 +7,10 @@ reporting an issue against an older version.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.4.x   | :white_check_mark: |
-| < 0.4   | :x:                |
+| 0.5.x   | :white_check_mark: |
+| < 0.5   | :x:                |
 
-0.4.x is the current line (`tahuti --version` reports `0.4.0`). Earlier lines are
+0.5.x is the current line (`tahuti --version` reports `0.5.1`). Earlier lines are
 unsupported and, because the project has not shipped a stable 1.0, may change
 or drop interfaces without notice.
 

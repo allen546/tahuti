@@ -1904,7 +1904,7 @@ class ManageBacClient:
 
         try:
             soup = self._get(task_path)
-            card = soup.find(class_="fusion-card-item")
+            card = soup.find(class_=("short-assignment", "fusion-card-item"))
             if card:
                 score_cell = card.find(class_=re.compile(r"assessment-cell|task-score")) or card
                 grade_el = score_cell.find(class_=re.compile(r"\bgrade\b"))
@@ -2327,7 +2327,7 @@ class ManageBacClient:
         main_content = soup.find("main") or soup
 
         # Parse card details from the detail page if present
-        card = soup.find(class_="fusion-card-item")
+        card = soup.find(class_=("short-assignment", "fusion-card-item"))
         if card:
             # Parse grade_letter
             grade_letter = None
@@ -2550,7 +2550,7 @@ class ManageBacClient:
         class_name: str | None = None,
     ) -> list[dict]:
         tasks: list[dict] = []
-        for card in soup.find_all("div", class_="fusion-card-item"):
+        for card in soup.find_all("div", class_=("short-assignment", "fusion-card-item")):
             title_el = card.find(class_="title")
             if not title_el:
                 continue

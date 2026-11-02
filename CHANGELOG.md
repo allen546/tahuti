@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Dates for `0.3.0` and earlier are derived from git history (those releases were
 never tagged); from `0.4.0` on, a date is the date of its `vX.Y.Z` git tag.
 
+## [0.5.1] - 2026-11-02
+
+### Fixed
+- **Task card scraping after ManageBac Faria tile migration.** ManageBac replaced `fusion-card-item` with `short-assignment section f-tile f-tile--inline` on class `core_tasks` listings and task detail pages, causing crawls to return 0 tasks and mark cached snapshot tasks as deleted. `_parse_tasks_from_soup`, `get_task_detail`, `get_teacher_feedback`, and `StealthTaskCrawler.fetch_task_details` now match both `short-assignment` and `fusion-card-item`.
+
 ## [0.5.0] - 2026-09-23
 
 ### Added

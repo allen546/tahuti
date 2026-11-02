@@ -61,7 +61,7 @@ def test_get_class_tasks(tmp_path: Path):
         <div class="status submitted">Submitted</div>
         <div class="labels-set"><div class="label">Homework</div><div class="label">Submitted</div></div>
     </div>
-    <div class="fusion-card-item">
+    <div class="short-assignment section f-tile f-tile--inline">
         <div class="title"><a href="/student/classes/101/core_tasks/222">HW 2</a></div>
         <div class="date">Oct 1, 5:00 PM</div>
         <div class="status not-submitted">Pending</div>
@@ -80,6 +80,44 @@ def test_get_class_tasks(tmp_path: Path):
     assert tasks[1]["id"] == "222"
     assert tasks[1]["status"] == "not-submitted"
     assert tasks[1]["has_submit_button"] is True
+
+
+def test_short_assignment_detail_feedback_and_stealth(tmp_path: Path):
+    from tahuti.daemon.events import StealthConfig
+    from tahuti.daemon.stealth import StealthTaskCrawler
+
+    cache = ResponseCache(cache_dir=tmp_path / "cache", enabled=True)
+    client = ManageBacClient("myschool", domain="managebac.cn", cache=cache)
+
+    html = """
+    <main>
+      <a href="/student/classes/101">Physics</a>
+      <div class="short-assignment section f-tile f-tile--inline">
+        <div class="h4 title">Midterm Review</div>
+        <div class="labels-set"><div class="label">Formative</div><span class="badge-label">Submitted</span></div>
+        <div class="assessment task-score assessment-cell">
+          <span class="grade">A</span>
+          <div class="points">95 / 100 pts</div>
+        </div>
+      </div>
+    </main>
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    with (
+        patch.object(client, "_get", return_value=soup),
+        patch.object(client, "get_submissions", return_value=[]),
+    ):
+        detail = client.get_task_detail("/student/classes/101/core_tasks/222")
+        feedback = client.get_teacher_feedback("101", "222")
+        stealth = StealthTaskCrawler(client, StealthConfig(enabled=False)).fetch_task_details("101", "222")
+
+    assert detail["grade_letter"] == "A"
+    assert detail["grade_score"] == "95 / 100 pts"
+    assert detail["status"] == "submitted"
+    assert feedback["grade"] == {"grade_letter": "A", "grade_score": "95 / 100 pts"}
+    assert stealth["title"] == "Midterm Review"
+    assert stealth["grade_letter"] == "A"
+    assert stealth["grade_score"] == "95 / 100 pts"
 
 
 def test_resolve_task_ids_snapshot_fast_path(tmp_path: Path):
