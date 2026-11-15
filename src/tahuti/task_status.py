@@ -2,10 +2,66 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from enum import Enum
 import re
-from typing import Any
+from typing import Any, Iterator
+
+_UNSUBMITTED_BASELINE: ContextVar[float | None] = ContextVar(
+    "tahuti_unsubmitted_baseline", default=None
+)
+
+_FRACTION_SCORE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)")
+_PERCENT_SCORE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+
+
+def get_unsubmitted_baseline() -> float | None:
+    """Return the active percentage baseline (0-100) for treating scores as unsubmitted."""
+    return _UNSUBMITTED_BASELINE.get()
+
+
+@contextmanager
+def unsubmitted_baseline_context(baseline: float | None) -> Iterator[None]:
+    """Temporarily set the unsubmitted percentage baseline for the current context."""
+    token = _UNSUBMITTED_BASELINE.set(baseline)
+    try:
+        yield
+    finally:
+        _UNSUBMITTED_BASELINE.reset(token)
+
+
+def extract_score_percentage(task: dict[str, Any]) -> float | None:
+    """Parse a task's grade_score into a 0-100 percentage, or None if unavailable."""
+    detail = task.get("detail") or task.get("enriched_task") or {}
+    raw_score = str(task.get("grade_score") or detail.get("grade_score") or "").strip()
+    if not raw_score or raw_score == "-":
+        return None
+    m = _FRACTION_SCORE_RE.search(raw_score)
+    if m:
+        num = float(m.group(1))
+        denom = float(m.group(2))
+        if denom > 0:
+            return (num / denom) * 100.0
+        return None
+    m = _PERCENT_SCORE_RE.search(raw_score)
+    if m:
+        return float(m.group(1))
+    return None
+
+
+def is_below_unsubmitted_baseline(
+    task: dict[str, Any], baseline: float | None = None
+) -> bool:
+    """Return True if *task* has a numeric score at or below the configured baseline."""
+    effective = baseline if baseline is not None else get_unsubmitted_baseline()
+    if effective is None:
+        return False
+    pct = extract_score_percentage(task)
+    if pct is None:
+        return False
+    return pct <= effective
 
 
 class SubmissionStatus(str, Enum):
@@ -236,8 +292,12 @@ def is_task_submitted_or_graded(task: dict[str, Any]) -> bool:
     return is_task_submitted(task) or is_task_graded(task)
 
 
-def is_task_todo(task: dict[str, Any]) -> bool:
-    """Return True if task is uncompleted (unsubmitted and ungraded, with pending submission)."""
+def is_task_todo(
+    task: dict[str, Any], unsubmitted_baseline: float | None = None
+) -> bool:
+    """Return True if task is uncompleted (unsubmitted and ungraded, or below baseline)."""
+    if is_below_unsubmitted_baseline(task, unsubmitted_baseline):
+        return True
     if is_task_submitted(task):
         return False
     grade_status = get_grade_status(task)
@@ -282,7 +342,26 @@ def as_naive(dt: datetime) -> datetime:
     return dt
 
 
-def classify_task_view(task: dict[str, Any], now_ref: datetime | None = None) -> str:
+def _is_task_past_due(
+    task: dict[str, Any], now_ref: datetime | None = None
+) -> bool:
+    """Return True if *task* has a parseable due_date strictly before *now_ref*."""
+    from .client import parse_due_date
+
+    now = as_naive(now_ref or datetime.now())
+    due_date = task.get("due_date")
+    due_dt = parse_due_date(due_date, now_ref=now) if due_date else None
+    if not due_dt:
+        return False
+    due_dt, now = align_timezones(due_dt, now)
+    return due_dt < now
+
+
+def classify_task_view(
+    task: dict[str, Any],
+    now_ref: datetime | None = None,
+    unsubmitted_baseline: float | None = None,
+) -> str:
     """Classify a task into canonical timeline views: 'upcoming', 'overdue', 'past'."""
     from .client import parse_due_date
 
@@ -306,7 +385,7 @@ def classify_task_view(task: dict[str, Any], now_ref: datetime | None = None) ->
         return "upcoming"
 
     # Due date is in the past: if task is incomplete/todo, it is overdue
-    if is_task_todo(task):
+    if is_task_todo(task, unsubmitted_baseline=unsubmitted_baseline):
         return "overdue"
     return "past"
 
@@ -315,14 +394,13 @@ def format_grade_display(
     task: dict[str, Any],
     standalone: bool = False,
     now_ref: datetime | None = None,
+    unsubmitted_baseline: float | None = None,
 ) -> str:
     """Format single unified grade display string.
 
     If standalone is True (e.g. tahuti view), returns only the grade value
     ('A', 'A (100 / 100 pts)', 'N/A', or 'None').
     """
-    from .client import parse_due_date
-
     detail = task.get("detail") or {}
     letter = str(task.get("grade_letter") or detail.get("grade_letter") or "").strip()
     score = str(task.get("grade_score") or detail.get("grade_score") or "").strip()
@@ -340,11 +418,19 @@ def format_grade_display(
     grade_status = get_grade_status(task)
     if grade_status == GradeStatus.GRADED:
         if score and letter and letter.lower() not in ("not assessed yet", "not assessed", "n/a"):
-            return f"{letter} ({score})" if standalone else f"{letter} ( {score} )"
-        if score:
-            return score
-        if letter:
-            return letter
+            grade_str = f"{letter} ({score})" if standalone else f"{letter} ( {score} )"
+        elif score:
+            grade_str = score
+        elif letter:
+            grade_str = letter
+        else:
+            grade_str = ""
+
+        if grade_str:
+            if is_below_unsubmitted_baseline(task, unsubmitted_baseline):
+                prefix = "⚠ Unsubmitted" if _is_task_past_due(task, now_ref) else "Unsubmitted"
+                return f"{prefix} · {grade_str}"
+            return grade_str
 
     if grade_status == GradeStatus.NOT_APPLICABLE:
         return "N/A"
@@ -358,16 +444,7 @@ def format_grade_display(
         return "Ungraded"
 
     # Unsubmitted / pending
-    # Naive local reference for the same reason as classify_task_view.
-    now = as_naive(now_ref or datetime.now())
-    due_date = task.get("due_date")
-    due_dt = parse_due_date(due_date, now_ref=now) if due_date else None
-    if due_dt:
-        due_dt, now = align_timezones(due_dt, now)
-
-        if due_dt < now:
-            return "⚠ Unsubmitted"
-    return "Unsubmitted"
+    return "⚠ Unsubmitted" if _is_task_past_due(task, now_ref) else "Unsubmitted"
 
 
 def get_task_display_status(task: dict[str, Any]) -> str:

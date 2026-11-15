@@ -56,6 +56,7 @@ from . import config
 from . import keychain
 from .config import (
     SNAPSHOT_FILENAME,
+    _coerce_unsubmitted_baseline,
     clear_creds,
     clear_session,
     config_dir,
@@ -93,6 +94,7 @@ from .filters import (
     summary_of,
 )
 from .formatters import error, ok, print_payload
+from .task_status import unsubmitted_baseline_context
 
 log = logging.getLogger(__name__)
 
@@ -706,63 +708,78 @@ def cmd_list(args) -> int:
         "overdue": [t for t in merged_result.get("overdue", []) if show_deleted or not t.get("deleted_from_server")]
     }
 
-    if subject:
-        result = filter_result_by_subject(result, subject)
-
-    # Apply status and tag filters (graded, submitted, grade, tag, completed)
-    completed_val = None
-    if args.completed:
-        completed_val = True
-    elif args.todo:
-        completed_val = False
-
-    if (
-        args.graded is not None
-        or args.submitted is not None
-        or args.grade is not None
-        or args.tag is not None
-        or completed_val is not None
-    ):
-        result = filter_result_by_status(
-            result,
-            graded=args.graded,
-            submitted=args.submitted,
-            grade=args.grade,
-            tag=args.tag,
-            completed=completed_val,
+    baseline = _coerce_unsubmitted_baseline(getattr(args, "unsubmitted_baseline", None))
+    if baseline is None:
+        baseline = _coerce_unsubmitted_baseline(
+            getattr(state.profile, "unsubmitted_baseline", None)
         )
 
-    views = result_views(result, view)
-    summary = summary_of(views)
-    payload = ok(
-        "list",
-        state.active_profile,
-        {
-            "meta": {
-                "student_name": result["student_name"],
-                "school": result["school"],
-                "domain": client.domain,
-                "base_url": result["base_url"],
-                "crawled_at": result["crawled_at"],
-                "view": view,
-                "subject_filter": subject,
-                "graded_filter": args.graded,
-                "submitted_filter": args.submitted,
-                "grade_filter": args.grade,
-                "tag_filter": args.tag,
-                "todo_filter": args.todo,
-                "completed_filter": args.completed,
-                # Truthful: a payload served from the cached snapshot was not
-                # detail-enriched by *this* run, so claiming `details: true`
-                # there told consumers a detail fetch happened when none did.
-                "details": bool(details) and not use_cached_snapshot,
-                "snapshot_source": "cache" if use_cached_snapshot else "crawl",
+    with unsubmitted_baseline_context(baseline):
+        if baseline is not None:
+            all_tasks = result["upcoming"] + result["past"] + result["overdue"]
+            reclassified = _reclassify_tasks(all_tasks)
+            result["upcoming"] = reclassified["upcoming"]
+            result["past"] = reclassified["past"]
+            result["overdue"] = reclassified["overdue"]
+
+        if subject:
+            result = filter_result_by_subject(result, subject)
+
+        # Apply status and tag filters (graded, submitted, grade, tag, completed)
+        completed_val = None
+        if args.completed:
+            completed_val = True
+        elif args.todo:
+            completed_val = False
+
+        if (
+            args.graded is not None
+            or args.submitted is not None
+            or args.grade is not None
+            or args.tag is not None
+            or completed_val is not None
+        ):
+            result = filter_result_by_status(
+                result,
+                graded=args.graded,
+                submitted=args.submitted,
+                grade=args.grade,
+                tag=args.tag,
+                completed=completed_val,
+            )
+
+        views = result_views(result, view)
+        summary = summary_of(views)
+        payload = ok(
+            "list",
+            state.active_profile,
+            {
+                "meta": {
+                    "student_name": result["student_name"],
+                    "school": result["school"],
+                    "domain": client.domain,
+                    "base_url": result["base_url"],
+                    "crawled_at": result["crawled_at"],
+                    "view": view,
+                    "subject_filter": subject,
+                    "graded_filter": args.graded,
+                    "submitted_filter": args.submitted,
+                    "grade_filter": args.grade,
+                    "tag_filter": args.tag,
+                    "todo_filter": args.todo,
+                    "completed_filter": args.completed,
+                    "unsubmitted_baseline": baseline,
+                    # Truthful: a payload served from the cached snapshot was not
+                    # detail-enriched by *this* run, so claiming `details: true`
+                    # there told consumers a detail fetch happened when none did.
+                    "details": bool(details) and not use_cached_snapshot,
+                    "snapshot_source": "cache" if use_cached_snapshot else "crawl",
+                },
+                "summary": summary,
+                "tasks": views,
             },
-            "summary": summary,
-            "tasks": views,
-        },
-    )
-    print_payload(payload, args.output, args.format)
+        )
+        print_payload(payload, args.output, args.format)
     return 0
 
 
@@ -882,12 +899,19 @@ def cmd_view(args) -> int:
     if feedback is not None:
         view_data["feedback"] = feedback
 
+    baseline = _coerce_unsubmitted_baseline(getattr(args, "unsubmitted_baseline", None))
+    if baseline is None:
+        baseline = _coerce_unsubmitted_baseline(
+            getattr(state.profile, "unsubmitted_baseline", None)
+        )
+
     payload = ok(
         "view",
         state.active_profile,
         view_data,
     )
-    print_payload(payload, args.output, args.format)
+    with unsubmitted_baseline_context(baseline):
+        print_payload(payload, args.output, args.format)
     return 0
 
 
@@ -1949,6 +1973,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Include tasks that were deleted from the server",
     )
+    list_parser.add_argument(
+        "--unsubmitted-baseline",
+        type=float,
+        default=None,
+        help="Percentage threshold (0-100): scores <= baseline count as unsubmitted/todo (overrides config defaults.unsubmitted_baseline)",
+    )
     list_parser.set_defaults(func=cmd_list)
 
     view = subparsers.add_parser("view", help="View one task in detail")
@@ -1967,6 +1997,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--feedback",
         action="store_true",
         help="Fetch teacher feedback for this task",
+    )
+    view.add_argument(
+        "--unsubmitted-baseline",
+        type=float,
+        default=None,
+        help="Percentage threshold (0-100): scores <= baseline count as unsubmitted/todo (overrides config defaults.unsubmitted_baseline)",
     )
     view.set_defaults(func=cmd_view)
 

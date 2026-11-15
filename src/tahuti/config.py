@@ -72,6 +72,16 @@ def _coerce_cache_ttl(value: object) -> int:
     return int(value)
 
 
+def _coerce_unsubmitted_baseline(value: object) -> float | None:
+    """Return *value* as a 0-100 percentage baseline, or None if unset/invalid."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    val = float(value)
+    if 0.0 <= val <= 100.0:
+        return val
+    return None
+
+
 def _as_dict(value: Any) -> dict:
     """Return *value* if it is a dict, else an empty dict."""
     return value if isinstance(value, dict) else {}
@@ -99,6 +109,7 @@ class ProfileConfig:
     default_details: bool = False
     default_format: str = "pretty"
     default_cache_ttl: int = DEFAULT_CACHE_TTL
+    unsubmitted_baseline: float | None = None
 
 
 @dataclass
@@ -268,6 +279,7 @@ def load_state(
         default_details=defaults.get("details", False),
         default_format=defaults.get("format", "pretty"),
         default_cache_ttl=_coerce_cache_ttl(defaults.get("cache_ttl")),
+        unsubmitted_baseline=_coerce_unsubmitted_baseline(defaults.get("unsubmitted_baseline")),
     )
     session = SessionConfig(
         name=active_profile,
@@ -291,19 +303,22 @@ def save_profile(state: AppState) -> None:
     config_data = _read_json(state.config_path)
     config_data.pop("profiles", None)
     config_data.pop("active_profile", None)
+    defaults_dict = {
+        "view": state.profile.default_view,
+        "pages": state.profile.default_pages,
+        "subject": state.profile.default_subject,
+        "details": state.profile.default_details,
+        "format": state.profile.default_format,
+        "cache_ttl": state.profile.default_cache_ttl,
+    }
+    if state.profile.unsubmitted_baseline is not None:
+        defaults_dict["unsubmitted_baseline"] = state.profile.unsubmitted_baseline
     config_data.update({
         "version": 1,
         "school": state.profile.school,
         "domain": state.profile.domain,
         "email": state.profile.email,
-        "defaults": {
-            "view": state.profile.default_view,
-            "pages": state.profile.default_pages,
-            "subject": state.profile.default_subject,
-            "details": state.profile.default_details,
-            "format": state.profile.default_format,
-            "cache_ttl": state.profile.default_cache_ttl,
-        },
+        "defaults": defaults_dict,
     })
     _write_json(state.config_path, config_data)
 
